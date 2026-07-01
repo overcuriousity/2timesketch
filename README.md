@@ -9,6 +9,7 @@ Supported sources:
 - **Browser histories** (`browser2timesketch.py`) — Firefox/Gecko,
   Chrome/Chromium/Edge/Brave, Safari/WebKit
 - **nginx logs** (`nginx2timesketch.py`) — access, error, redirect
+- **AWS CloudTrail** (`cloudtrail2timesketch.py`) — management, data, and insight events
 
 ## Requirements
 
@@ -42,6 +43,8 @@ All converters share:
 - `web:access:request`
 - `web:error:log`
 - `web:redirect:request`
+- `cloudtrail:management:event`
+- `cloudtrail:data:event`
 
 ## Forensic audit reports
 
@@ -121,6 +124,26 @@ python3 nginx2timesketch.py -i /var/log/nginx --output-dir ./output -f csv
 python3 nginx2timesketch.py -i /var/log/nginx/access.log -f jsonl -o access.jsonl
 ```
 
+### cloudtrail2timesketch
+
+```bash
+# Recursively process a CloudTrail archive (default: stdout CSV)
+python3 cloudtrail2timesketch.py -i /path/to/CloudTrail
+
+# Write to file with verbose progress
+python3 cloudtrail2timesketch.py -i /path/to/CloudTrail -o cloudtrail.csv -v
+
+# Filter by event time range and write JSONL
+python3 cloudtrail2timesketch.py -i /path/to/CloudTrail \
+    --since "2026-06-01T00:00:00Z" \
+    --until "2026-06-18T00:00:00Z" \
+    -f jsonl -o cloudtrail.jsonl
+
+# Generate an audit report
+python3 cloudtrail2timesketch.py -i /path/to/CloudTrail -o cloudtrail.csv \
+    --report cloudtrail.csv.report.json
+```
+
 ## Repository layout
 
 ```
@@ -130,12 +153,14 @@ python3 nginx2timesketch.py -i /var/log/nginx/access.log -f jsonl -o access.json
 ├── journal2timesketch.py      # journal CLI wrapper
 ├── browser2timesketch.py      # browser CLI wrapper
 ├── nginx2timesketch.py        # nginx CLI wrapper
+├── cloudtrail2timesketch.py   # CloudTrail CLI wrapper
 └── timesketch_converters/
     ├── __init__.py
     ├── common.py              # shared helpers
     ├── journal.py             # journal converter core
     ├── browser.py             # browser converter core
-    └── nginx.py               # nginx converter core
+    ├── nginx.py               # nginx converter core
+    └── cloudtrail.py          # CloudTrail converter core
 ```
 
 ## Importing into Timesketch
