@@ -18,6 +18,7 @@ from .common import (
     to_iso8601,
     to_unix_microseconds,
 )
+from .terminal import get_terminal
 
 TIMESKETCH_REQUIRED = ["datetime", "timestamp_desc", "message"]
 
@@ -162,13 +163,20 @@ def convert_journal(
     if not journal_path.is_dir():
         raise ConverterError(f"Input is not a directory: {journal_dir}")
 
+    ui = get_terminal()
+    ui.header(
+        "journal2timesketch",
+        subtitle="Convert systemd journal → Timesketch timeline",
+        badges=[("journal", "accent"), (output_format, "muted")],
+    )
+
     report: AuditReport | None = None
     if report_path:
         report = AuditReport("journal2timesketch", command_line or [])
         report.add_input_path(journal_path)
 
     cmd = build_journalctl_cmd(journal_dir, since, until, boot)
-    log(f"Running: {' '.join(cmd)}", verbose)
+    ui.step("Command", " ".join(cmd))
 
     try:
         proc = subprocess.Popen(
@@ -188,17 +196,18 @@ def convert_journal(
     count = 0
     errors = 0
 
-    for line in proc.stdout:  # type: ignore[union-attr]
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            errors += 1
-            continue
-        writer.add(build_row(entry, str(journal_path.resolve())))
-        count += 1
+    with ui.spinner("Streaming journal entries…"):
+        for line in proc.stdout:  # type: ignore[union-attr]
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                errors += 1
+                continue
+            writer.add(build_row(entry, str(journal_path.resolve())))
+            count += 1
 
     proc.wait()
     stderr_output = proc.stderr.read()  # type: ignore[union-attr]
@@ -224,9 +233,17 @@ def convert_journal(
             "boot": boot,
         })
         report.write(report_path)
-        log(f"Audit report written to {report_path}", verbose)
+        ui.success(f"Audit report written to {report_path}")
 
-    log(f"Exported {written} entries ({errors} JSON parse errors).", verbose)
+    ui.summary(
+        "Result",
+        {
+            "Rows written": f"{written:,}",
+            "JSON parse errors": f"{errors:,}",
+            "Output": output if output != "-" else "stdout",
+            "Format": output_format,
+        },
+    )
     return written, errors
 
 

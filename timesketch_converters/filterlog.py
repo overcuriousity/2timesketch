@@ -24,6 +24,7 @@ from .common import (
     to_iso8601,
     to_unix_microseconds,
 )
+from .terminal import get_terminal
 
 # Regexes for the leading syslog/export timestamp.
 _ISO_TIMESTAMP_RE = re.compile(
@@ -495,7 +496,13 @@ def convert_filterlog(
     if not files:
         raise ConverterError(f"No filterlog files found in: {input_path}")
 
-    log(f"Found {len(files)} filterlog file(s)", verbose)
+    ui = get_terminal()
+    ui.header(
+        "filterlog2timesketch",
+        subtitle="Convert pfSense/OPNsense filterlog → Timesketch timeline",
+        badges=[("firewall", "danger"), (output_format, "muted")],
+    )
+    ui.step("Files found", f"{len(files)} filterlog file(s)")
 
     since_dt = _parse_since_until(since)
     until_dt = _parse_since_until(until)
@@ -513,8 +520,8 @@ def convert_filterlog(
     rows_unparseable = 0
     action_counts: dict[str, int] = {}
 
-    for log_file in files:
-        log(f"  Processing {log_file}", verbose)
+    for idx, log_file in enumerate(files, start=1):
+        ui.progress(idx, len(files), label=str(log_file))
         source_str = str(log_file.resolve())
 
         try:
@@ -550,6 +557,7 @@ def convert_filterlog(
         except OSError as exc:
             raise ConverterError(f"Failed to read {log_file}: {exc}") from exc
 
+    ui.end_progress()
     written = writer.write()
 
     if report:
@@ -568,13 +576,19 @@ def convert_filterlog(
             "year": year,
         })
         report.write(report_path)
-        log(f"Audit report written to {report_path}", verbose)
+        ui.success(f"Audit report written to {report_path}")
 
-    log(
-        f"Exported {written} rows from {len(files)} files "
-        f"({rows_skipped_by_time} skipped by time, {rows_unparseable} unparseable).",
-        verbose,
-    )
+    summary_items: dict[str, Any] = {
+        "Rows written": f"{written:,}",
+        "Files processed": f"{len(files)}",
+        "Skipped by time": f"{rows_skipped_by_time:,}",
+        "Unparseable": f"{rows_unparseable:,}",
+        "Output": output if output != "-" else "stdout",
+        "Format": output_format,
+    }
+    for action, count in sorted(action_counts.items()):
+        summary_items[f"Action: {action}"] = f"{count:,}"
+    ui.summary("Result", summary_items)
 
     return {
         "rows_written": written,

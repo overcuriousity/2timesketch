@@ -18,6 +18,7 @@ from .common import (
     to_iso8601,
     to_unix_microseconds,
 )
+from .terminal import get_terminal
 
 # Combined log format used for access and redirect logs.
 _ACCESS_LOG_RE = re.compile(
@@ -240,7 +241,14 @@ def convert_nginx(
         Mapping of log_type -> number of rows written.
     """
     files_by_type = _find_log_files(input_path)
-    log(f"Found log types: {', '.join(files_by_type.keys())}", verbose)
+
+    ui = get_terminal()
+    ui.header(
+        "nginx2timesketch",
+        subtitle="Convert nginx access/error/redirect logs → Timesketch timeline",
+        badges=[("nginx", "accent"), (output_format, "muted")],
+    )
+    ui.step("Log types found", ", ".join(files_by_type.keys()))
 
     report: AuditReport | None = None
     if report_path:
@@ -266,10 +274,17 @@ def convert_nginx(
             until_dt = until_dt.replace(tzinfo=datetime.timezone.utc)
 
     rows_by_type: dict[str, list[dict[str, Any]]] = {}
+    total_files = sum(len(files) for files in files_by_type.values())
+    processed_files = 0
+
     for log_type, files in files_by_type.items():
         rows: list[dict[str, Any]] = []
         for log_file in files:
-            log(f"  Processing {log_file}", verbose)
+            processed_files += 1
+            ui.step(
+                f"[{processed_files}/{total_files}] {log_type}",
+                str(log_file),
+            )
             try:
                 with _open_log(log_file) as fh:
                     for line in fh:
@@ -299,7 +314,7 @@ def convert_nginx(
             counts[log_type] = writer.write()
             if report:
                 report.add_output_file(str(dest), writer.content_hash)
-            log(f"  Wrote {counts[log_type]} rows to {dest}", verbose)
+            ui.success(f"Wrote {counts[log_type]:,} rows to {dest}")
     else:
         # Combined output.
         writer = OutputWriter(output, output_format, compute_hash=compute_hash)
@@ -313,7 +328,6 @@ def convert_nginx(
                 report.add_stdout_output(writer.content_hash)
             else:
                 report.add_output_file(output, writer.content_hash)
-        log(f"Exported {total} entries.", verbose)
 
     if report:
         report.set_statistics({
@@ -323,6 +337,17 @@ def convert_nginx(
             "output_dir": output_dir,
         })
         report.write(report_path)
-        log(f"Audit report written to {report_path}", verbose)
+        ui.success(f"Audit report written to {report_path}")
+
+    summary_items: dict[str, Any] = {
+        "Files processed": str(total_files),
+        "Output": output if output != "-" else "stdout",
+        "Format": output_format,
+    }
+    if output_dir:
+        summary_items["Output directory"] = output_dir
+    for log_type, count in counts.items():
+        summary_items[f"Rows ({log_type})"] = f"{count:,}"
+    ui.summary("Result", summary_items)
 
     return counts

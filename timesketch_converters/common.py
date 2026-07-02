@@ -22,6 +22,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .terminal import get_terminal
+
 TIMESKETCH_REQUIRED = ["datetime", "timestamp_desc", "message"]
 
 # Common columns that every converter emits first, in this order.
@@ -409,7 +411,15 @@ def add_verbose_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_no_color_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI colors and Unicode box-drawing characters.",
+    )
+
+
 def log(message: str, verbose: bool = True) -> None:
-    """Write a progress message to stderr when verbose mode is enabled."""
+    """Write a styled progress message to stderr when verbose mode is enabled."""
     if verbose:
-        print(message, file=sys.stderr)
+        get_terminal().log(message)

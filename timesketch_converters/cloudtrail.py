@@ -24,6 +24,7 @@ from .common import (
     normalize_ip,
     to_iso8601,
 )
+from .terminal import get_terminal
 
 # Top-level scalar fields to promote directly into the row.
 _TOP_LEVEL_FIELDS = (
@@ -251,7 +252,13 @@ def convert_cloudtrail(
     if not files:
         raise ConverterError(f"No CloudTrail JSON files found in: {input_path}")
 
-    log(f"Found {len(files)} CloudTrail file(s)", verbose)
+    ui = get_terminal()
+    ui.header(
+        "cloudtrail2timesketch",
+        subtitle="Convert AWS CloudTrail logs → Timesketch timeline",
+        badges=[("cloudtrail", "info"), (output_format, "muted")],
+    )
+    ui.step("Files found", f"{len(files)} CloudTrail JSON file(s)")
 
     since_us = _parse_event_time(since) if since else 0
     until_us = _parse_event_time(until) if until else 0
@@ -269,13 +276,13 @@ def convert_cloudtrail(
     parse_errors = 0
     skipped_by_time = 0
 
-    for file_path in files:
-        log(f"  Processing {file_path}", verbose)
+    for idx, file_path in enumerate(files, start=1):
+        ui.progress(idx, len(files), label=str(file_path))
         try:
             records, err_count = _read_json_file(file_path)
         except CloudTrailParseError as exc:
-            log(f"    Warning: {exc}", verbose)
             parse_errors += 1
+            ui.warning(str(exc))
             continue
 
         parse_errors += err_count
@@ -298,6 +305,7 @@ def convert_cloudtrail(
             writer.add(row)
             rows_written += 1
 
+    ui.end_progress()
     written = writer.write()
 
     if report:
@@ -315,12 +323,18 @@ def convert_cloudtrail(
         }
         report.set_statistics(stats)
         report.write(report_path)
-        log(f"Audit report written to {report_path}", verbose)
+        ui.success(f"Audit report written to {report_path}")
 
-    log(
-        f"Exported {written} rows from {files_processed} files "
-        f"({parse_errors} parse errors, {skipped_by_time} skipped by time).",
-        verbose,
+    ui.summary(
+        "Result",
+        {
+            "Rows written": f"{written:,}",
+            "Files processed": f"{files_processed}/{len(files)}",
+            "Parse errors": f"{parse_errors:,}",
+            "Skipped by time": f"{skipped_by_time:,}",
+            "Output": output if output != "-" else "stdout",
+            "Format": output_format,
+        },
     )
 
     return {

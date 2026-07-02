@@ -30,6 +30,7 @@ from .common import (
     log,
     to_iso8601,
 )
+from .terminal import get_terminal
 
 
 class BrowserDetectionError(CommonBrowserDetectionError):
@@ -2072,8 +2073,8 @@ def extract_all_events(
     all_rows: list[dict[str, Any]] = []
     event_counts: dict[str, int] = {}
 
-    log(f"Extracting events from {browser_name} database...", verbose)
-    log("=" * 60, verbose)
+    ui = get_terminal()
+    ui.step("Browser", browser_name)
 
     if browser_type == "gecko":
         extractors = [
@@ -2113,12 +2114,10 @@ def extract_all_events(
             events = extractor_func(conn, browser_name)
             all_rows.extend(events)
             event_counts[name] = len(events)
-            log(f"  + {name:25} {len(events):>7,} events", verbose)
+            ui.step(name, f"{len(events):,} events")
         except Exception as e:
-            log(f"  x {name:25} Error: {e}", verbose)
             event_counts[name] = 0
-
-    log("=" * 60, verbose)
+            ui.error(f"{name}: {e}")
 
     return all_rows, event_counts
 
@@ -2151,9 +2150,16 @@ def convert_browser(
     """
     input_path_obj = Path(input_path)
 
-    log(f"Validating database: {input_path}", verbose)
+    ui = get_terminal()
+    ui.header(
+        "browser2timesketch",
+        subtitle="Convert browser history → Timesketch timeline",
+        badges=[("browser", "purple"), (output_format, "muted")],
+    )
+
+    ui.step("Validate", str(input_path_obj))
     validate_sqlite_database(input_path)
-    log("Database is valid SQLite file", verbose)
+    ui.success("Database is a valid SQLite file")
 
     report: AuditReport | None = None
     if report_path:
@@ -2163,9 +2169,9 @@ def convert_browser(
     browser_type = browser_type.lower()
 
     if browser_type == "auto":
-        log("Auto-detecting browser type...", verbose)
-        browser_type = detect_browser_type(input_path)
-        log(f"Detected browser type: {browser_type}", verbose)
+        with ui.spinner("Auto-detecting browser type"):
+            browser_type = detect_browser_type(input_path)
+        ui.step("Detected", browser_type)
     else:
         if browser_type == "firefox":
             browser_type = "gecko"
@@ -2174,9 +2180,8 @@ def convert_browser(
 
         detected_type = detect_browser_type(input_path)
         if detected_type != browser_type:
-            log(
-                f"Warning: specified '{browser_type}' but database appears to be '{detected_type}'",
-                verbose,
+            ui.warning(
+                f"specified '{browser_type}' but database appears to be '{detected_type}'"
             )
 
     try:
@@ -2185,9 +2190,10 @@ def convert_browser(
         raise ConverterError(f"Cannot open database: {exc}") from exc
 
     try:
-        all_rows, event_counts = extract_all_events(
-            conn, browser_type, browser_name=browser_name, verbose=verbose
-        )
+        with ui.spinner("Extracting browser events"):
+            all_rows, event_counts = extract_all_events(
+                conn, browser_type, browser_name=browser_name, verbose=verbose
+            )
     finally:
         conn.close()
 
@@ -2216,18 +2222,18 @@ def convert_browser(
             "event_counts": event_counts,
         })
         report.write(report_path)
-        log(f"Audit report written to {report_path}", verbose)
+        ui.success(f"Audit report written to {report_path}")
 
-    log("", verbose)
-    log("=" * 60, verbose)
-    log("EXTRACTION COMPLETE", verbose)
-    log("=" * 60, verbose)
-    log(f"Total events:  {written:,}", verbose)
-    log("Event breakdown:", verbose)
+    summary_items: dict[str, Any] = {
+        "Rows written": f"{written:,}",
+        "Browser type": browser_type,
+        "Browser name": browser_name or "auto",
+        "Output": output if output != "-" else "stdout",
+        "Format": output_format,
+    }
     for event_type, count in sorted(event_counts.items()):
         if count > 0:
-            log(f"  - {event_type:25} {count:>7,} events", verbose)
-    log(f"Output saved to: {output}", verbose)
-    log("=" * 60, verbose)
+            summary_items[event_type] = f"{count:,}"
+    ui.summary("Extraction complete", summary_items)
 
     return written

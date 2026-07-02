@@ -11,6 +11,7 @@ Supported sources:
 - **nginx logs** (`nginx2timesketch.py`) — access, error, redirect
 - **AWS CloudTrail** (`cloudtrail2timesketch.py`) — management, data, and insight events
 - **pfSense/OPNsense filterlog** (`filterlog2timesketch.py`) — IPv4/IPv6 TCP/UDP/ICMP firewall logs
+- **Suricata IDS/IPS logs** (`suricata2timesketch.py`) — EVE JSON, fast.log, and OPNsense syslog exports
 
 ## Requirements
 
@@ -22,8 +23,10 @@ Supported sources:
 
 All converters share:
 
-- A uniform CLI (`-i/--input`, `-o/--output`, `-f/--format`, `-v/--verbose`, `--report`).
+- A uniform CLI (`-i/--input`, `-o/--output`, `-f/--format`, `-v/--verbose`, `--report`, `--no-color`).
 - CSV output by default (`-f jsonl` is also supported).
+- Styled terminal output (headers, progress bars, badges, result panels) on stderr;
+  pass `--no-color` or set `NO_COLOR` to disable ANSI colors and Unicode box drawing.
 - The same common columns at the start of every row:
 
 | Column | Description |
@@ -211,6 +214,26 @@ python3 filterlog2timesketch.py -i /path/to/filter.log -o filterlog.csv \
     --report filterlog.csv.report.json
 ```
 
+### suricata2timesketch
+
+```bash
+# Convert a Suricata log (EVE JSON, fast.log, or OPNsense syslog export)
+python3 suricata2timesketch.py -i /var/log/suricata/eve.json
+
+# Convert an OPNsense syslog export
+python3 suricata2timesketch.py -i /path/to/suricata.log -o suricata.csv -v
+
+# Filter by event time range and write JSONL
+python3 suricata2timesketch.py -i /var/log/suricata/eve.json \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o suricata.jsonl
+
+# Generate an audit report
+python3 suricata2timesketch.py -i /var/log/suricata/eve.json -o suricata.csv \
+    --report suricata.csv.report.json
+```
+
 ## Repository layout
 
 ```
@@ -222,6 +245,7 @@ python3 filterlog2timesketch.py -i /path/to/filter.log -o filterlog.csv \
 ├── nginx2timesketch.py        # nginx CLI wrapper
 ├── cloudtrail2timesketch.py   # CloudTrail CLI wrapper
 ├── filterlog2timesketch.py    # pfSense/OPNsense filterlog CLI wrapper
+├── suricata2timesketch.py     # Suricata IDS/IPS CLI wrapper
 └── timesketch_converters/
     ├── __init__.py
     ├── common.py              # shared helpers
@@ -229,7 +253,8 @@ python3 filterlog2timesketch.py -i /path/to/filter.log -o filterlog.csv \
     ├── browser.py             # browser converter core
     ├── nginx.py               # nginx converter core
     ├── cloudtrail.py          # CloudTrail converter core
-    └── filterlog.py           # filterlog converter core
+    ├── filterlog.py           # filterlog converter core
+    └── suricata.py            # Suricata converter core
 ```
 
 ## Importing into Timesketch

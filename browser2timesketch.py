@@ -7,7 +7,8 @@ import argparse
 import sys
 
 from timesketch_converters.browser import convert_browser
-from timesketch_converters.common import ConverterError, add_report_arg
+from timesketch_converters.common import ConverterError, add_no_color_arg, add_report_arg
+from timesketch_converters.terminal import get_terminal
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,8 +52,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Print progress messages to stderr.",
     )
     add_report_arg(parser)
+    add_no_color_arg(parser)
 
     args = parser.parse_args(argv)
+    if args.no_color:
+        get_terminal(force_color=False)
 
     try:
         convert_browser(
