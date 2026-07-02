@@ -13,7 +13,7 @@ from .common import (
     AuditReport,
     ConverterError,
     OutputWriter,
-    extract_ips,
+    first_ip,
     log,
     to_iso8601,
     to_unix_microseconds,
@@ -122,7 +122,10 @@ def build_row(entry: dict[str, Any], source: str) -> dict[str, Any]:
 
     row["boot_id"] = entry.get("_BOOT_ID", "")
     row["cursor"] = entry.get("__CURSOR", "")
-    row["ip_address"] = " | ".join(extract_ips(row["message"]))
+    # Journal messages have no dst concept; a literal IP found in free text
+    # (e.g. "Failed password for root from 1.2.3.4 port 22") is the remote
+    # peer connecting to this host, i.e. the source of the event.
+    row["src_ip"] = first_ip(row["message"])
 
     return row
 
@@ -130,7 +133,7 @@ def build_row(entry: dict[str, Any], source: str) -> dict[str, Any]:
 def fieldnames() -> list[str]:
     """Return the fixed CSV column order for journal output."""
     cols = list(TIMESKETCH_REQUIRED)
-    cols += ["data_type", "timestamp", "source", "ip_address"]
+    cols += ["data_type", "timestamp", "source", "src_ip"]
     cols += ["priority", "priority_num"]
     cols += [f.lstrip("_").lower() for f in EXTRA_FIELDS]
     cols += ["boot_id", "cursor"]

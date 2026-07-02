@@ -25,6 +25,18 @@ from typing import Any
 TIMESKETCH_REQUIRED = ["datetime", "timestamp_desc", "message"]
 
 # Common columns that every converter emits first, in this order.
+#
+# src_ip / dst_ip form the suite-wide IP convention. Every converter emits
+# these as discrete, single-value columns (never pipe-joined or otherwise
+# combined) so that timeseries/graphing tools can filter and aggregate on
+# them directly:
+#   - src_ip: the IP that originated the event (the client, caller, or
+#     connection initiator).
+#   - dst_ip: the IP the event was directed at, when the source format
+#     identifies a distinct destination (e.g. firewall logs).
+# A converter leaves a column empty ("") for a given row when that role
+# does not apply or cannot be determined - it never encodes multiple
+# addresses into one field. See README.md for the per-source mapping.
 COMMON_FIELDS = [
     "datetime",
     "timestamp_desc",
@@ -32,7 +44,8 @@ COMMON_FIELDS = [
     "data_type",
     "timestamp",
     "source",
-    "ip_address",
+    "src_ip",
+    "dst_ip",
 ]
 
 
@@ -119,6 +132,30 @@ def extract_ips(text: str | None) -> list[str]:
             pass
 
     return list(seen.keys())
+
+
+def normalize_ip(value: str | None) -> str:
+    """Validate and canonicalize a single IPv4/IPv6 address string.
+
+    Returns the canonical string form (e.g. compressed IPv6), or ``""`` if
+    ``value`` is missing or not a valid IP address.
+    """
+    if not value:
+        return ""
+    try:
+        return str(ipaddress.ip_address(value.strip().strip("[]")))
+    except ValueError:
+        return ""
+
+
+def first_ip(text: str | None) -> str:
+    """Return the first validated IP address found in free-form text.
+
+    Used by sources with no reliable directionality, where only a single
+    best-effort address can be attributed to a src_ip/dst_ip column.
+    """
+    ips = extract_ips(text)
+    return ips[0] if ips else ""
 
 
 # ---------------------------------------------------------------------------

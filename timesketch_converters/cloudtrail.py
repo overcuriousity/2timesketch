@@ -20,8 +20,8 @@ from .common import (
     AuditReport,
     ConverterError,
     OutputWriter,
-    extract_ips,
     log,
+    normalize_ip,
     to_iso8601,
 )
 
@@ -54,15 +54,6 @@ _FLATTEN_FIELDS = (
     "serviceEventDetails",
     "tlsDetails",
 )
-
-# Text sources scanned when extracting IP addresses.
-_IP_SCAN_FIELDS = (
-    "sourceIPAddress",
-    "userAgent",
-    "errorMessage",
-    "vpcEndpointId",
-)
-
 
 class CloudTrailParseError(ConverterError):
     """Raised when a CloudTrail file cannot be parsed."""
@@ -157,24 +148,6 @@ def _build_message(record: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _extract_ips_from_row(row: dict[str, Any]) -> str:
-    """Extract validated IPs from CloudTrail-specific text fields."""
-    parts: list[str] = []
-    for key in _IP_SCAN_FIELDS:
-        value = row.get(key)
-        if value:
-            parts.append(str(value))
-
-    # Also scan any flattened fields that might contain addresses.
-    for key, value in row.items():
-        if isinstance(value, str) and any(
-            key.endswith(suffix) for suffix in ("ip", "ipAddress", "sourceIPAddress", "clientIp")
-        ):
-            parts.append(value)
-
-    return " | ".join(extract_ips(" ".join(parts)))
-
-
 def _build_row(record: dict[str, Any], source_file: str) -> dict[str, Any] | None:
     """Map a single CloudTrail record to a Timesketch row."""
     event_time = record.get("eventTime")
@@ -206,14 +179,16 @@ def _build_row(record: dict[str, Any], source_file: str) -> dict[str, Any] | Non
         row["resources"] = _serialize(resources)
 
     # Promote sourceIPAddress and userAgent at the top level if present.
+    # sourceIPAddress is not always a literal IP - AWS service principals
+    # (e.g. "config.amazonaws.com") populate it with a DNS name instead, so
+    # src_ip is only set when it validates as a real address.
     source_ip = record.get("sourceIPAddress")
     if source_ip is not None:
         row["sourceIPAddress"] = source_ip
+        row["src_ip"] = normalize_ip(source_ip)
     user_agent = record.get("userAgent")
     if user_agent is not None:
         row["userAgent"] = user_agent
-
-    row["ip_address"] = _extract_ips_from_row(row)
 
     return row
 

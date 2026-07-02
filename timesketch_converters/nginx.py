@@ -13,8 +13,8 @@ from .common import (
     AuditReport,
     ConverterError,
     OutputWriter,
-    extract_ips,
     log,
+    normalize_ip,
     to_iso8601,
     to_unix_microseconds,
 )
@@ -98,7 +98,7 @@ def _parse_access_line(line: str, log_type: str, source_file: str) -> dict[str, 
         "data_type": config["data_type"],
         "source": source_file,
         "log_type": log_type,
-        "ip_address": ip,
+        "src_ip": normalize_ip(ip),
         "remote_ident": remote_ident,
         "remote_user": remote_user,
         "http_method": method,
@@ -136,7 +136,7 @@ def _parse_error_line(line: str, source_file: str) -> dict[str, Any] | None:
         "data_type": config["data_type"],
         "source": source_file,
         "log_type": "error",
-        "ip_address": "",
+        "src_ip": "",
         "error_level": level,
         "worker_pid": int(pid),
         "worker_tid": int(tid),
@@ -146,7 +146,7 @@ def _parse_error_line(line: str, source_file: str) -> dict[str, Any] | None:
     # Try to extract the client IP from the raw message tail.
     client_match = re.search(r"client:\s+(\S+)", message)
     if client_match:
-        row["ip_address"] = client_match.group(1).rstrip(",;.")
+        row["src_ip"] = normalize_ip(client_match.group(1).rstrip(",;."))
 
     return row
 

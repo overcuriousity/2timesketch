@@ -26,7 +26,7 @@ from .common import (
     ConverterError,
     OutputWriter,
     ValidationError,
-    extract_ips,
+    first_ip,
     log,
     to_iso8601,
 )
@@ -245,14 +245,19 @@ def column_exists(conn: sqlite3.Connection, table_name: str, column_name: str) -
         return False
 
 
-def _extract_row_ips(row: dict[str, Any]) -> str:
-    """Return a pipe-separated list of IPs found in text fields of a row."""
+def _extract_row_dst_ip(row: dict[str, Any]) -> str:
+    """Return the first IP literal found in a row's URL/text fields.
+
+    Browser history has no src/dst connection semantics of its own, but a
+    literal IP appearing in a visited URL represents the remote resource the
+    local browser connected to - i.e. a destination from the user's device.
+    """
     parts: list[str] = []
     for key in _IP_SCAN_FIELDS:
         value = row.get(key)
         if value:
             parts.append(str(value))
-    return " | ".join(extract_ips(" ".join(parts)))
+    return first_ip(" ".join(parts))
 
 
 def _finalize_rows(rows: list[dict[str, Any]], source: Path) -> None:
@@ -261,7 +266,7 @@ def _finalize_rows(rows: list[dict[str, Any]], source: Path) -> None:
     for row in rows:
         row["datetime"] = to_iso8601(row.get("timestamp", 0), unit="us")
         row["source"] = source_str
-        row["ip_address"] = _extract_row_ips(row)
+        row["dst_ip"] = _extract_row_dst_ip(row)
 
 
 # ============================================================================
