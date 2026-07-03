@@ -53,6 +53,43 @@ All converters share:
 - `firewall:filterlog:block`
 - `firewall:filterlog:pass`
 
+## Entity taxonomy
+
+Field names for the same real-world entity are kept identical across every
+converter, so a Timesketch query or a saved view works unchanged regardless
+of which source produced the event. The naming follows the role-based
+attribute convention used by [MISP](https://www.misp-project.org/)'s network
+objects (`ip-src`/`ip-dst`, `src-port`/`dst-port`): a *source* and a
+*destination* role rather than source-specific names like
+`remote_addr` or `client_ip`. MISP's attribute names use hyphens; this suite
+uses `snake_case` instead so every column name is a valid CSV header and
+Python identifier, but the semantic split (`src_*` = originator, `dst_*` =
+recipient) is the same one MISP uses.
+
+| Concept | Column(s) | Used by |
+|---|---|---|
+| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata |
+| Port | `src_port`, `dst_port` | filterlog, Suricata |
+| Hostname/domain | `host` | browser |
+| URL | `url` | browser, Suricata (`http` events) |
+| User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events) |
+
+Where a source's native field is a well-known, distinctly-cased key of its
+own schema (CloudTrail's `sourceIPAddress`/`userAgent`), that raw column is
+kept **as well as** the canonical `src_ip`/`user_agent` alias, so both the
+original AWS field name and the cross-source query both work. Suricata's
+EVE JSON nests HTTP fields as `http.url`/`http.http_user_agent`; those are
+promoted (renamed, not duplicated) to the top-level `url`/`user_agent`
+columns instead of being left under Suricata's own dotted names.
+
+Any converter-specific field that does not fit one of these shared roles
+(e.g. `icmp_destination_ip` — the destination address embedded inside an
+ICMP error payload, distinct from the ICMP packet's own `dst_ip`, or
+browser's many role-specific `*_url` columns such as `referrer_url`/
+`opener_url`/`tab_url`, which each carry a distinct meaning within a single
+row) keeps its source-native name rather than being forced into the shared
+taxonomy.
+
 ## IP address convention
 
 Every converter agrees on the same two columns for IP addresses: `src_ip`
@@ -92,6 +129,10 @@ If you need to search across both roles at once in Timesketch (e.g. "any
 event touching 45.148.10.67"), search `src_ip:45.148.10.67 OR
 dst_ip:45.148.10.67` — Timesketch indexes every column, so this works
 without a combined field.
+
+The same `src_*`/`dst_*` role split applies to ports: filterlog and Suricata
+both emit `src_port`/`dst_port` (never `source_port`/`destination_port` or
+other source-specific spellings).
 
 ## Forensic audit reports
 

@@ -942,7 +942,7 @@ def extract_gecko_visits(
             "typed_count": typed or 0,
             "frecency_score": frecency,
             "hidden": bool(hidden),
-            "domain": rev_host[::-1] if rev_host else "",
+            "host": rev_host[::-1] if rev_host else "",
         }
 
         if description:

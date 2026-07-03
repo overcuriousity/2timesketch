@@ -260,9 +260,9 @@ def _parse_filterlog_csv(
 
         if protocol in ("tcp", "udp"):
             if len(fields) > 20:
-                _add_field(row, "source_port", _safe_int(fields[20]))
+                _add_field(row, "src_port", _safe_int(fields[20]))
             if len(fields) > 21:
-                _add_field(row, "destination_port", _safe_int(fields[21]))
+                _add_field(row, "dst_port", _safe_int(fields[21]))
             if len(fields) > 22:
                 _add_field(row, "data_length", _safe_int(fields[22]))
 
@@ -323,9 +323,9 @@ def _parse_filterlog_csv(
 
         if protocol in ("tcp", "udp"):
             if len(fields) > 17:
-                _add_field(row, "source_port", _safe_int(fields[17]))
+                _add_field(row, "src_port", _safe_int(fields[17]))
             if len(fields) > 18:
-                _add_field(row, "destination_port", _safe_int(fields[18]))
+                _add_field(row, "dst_port", _safe_int(fields[18]))
             if len(fields) > 19:
                 _add_field(row, "data_length", _safe_int(fields[19]))
 
@@ -399,8 +399,8 @@ def _build_message(row: dict[str, Any]) -> str:
     protocol_id = row.get("protocol_id")
     source_ip = row.get("src_ip", "")
     destination_ip = row.get("dst_ip", "")
-    source_port = row.get("source_port")
-    destination_port = row.get("destination_port")
+    source_port = row.get("src_port")
+    destination_port = row.get("dst_port")
     rule_number = row.get("rule_number", "")
     rule_uuid = row.get("rule_uuid", "")
     icmp_type = row.get("icmp_type", "")

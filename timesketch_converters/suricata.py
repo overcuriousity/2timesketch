@@ -96,6 +96,12 @@ class SuricataParseError(ConverterError):
     """Raised when a Suricata line cannot be parsed."""
 
 
+# EVE JSON raw field names that duplicate a suite-wide canonical column
+# already promoted onto the row (protocol, dst_ip, dst_port); skipped during
+# flattening to avoid emitting the same value under two column names.
+_EVE_RAW_DUPLICATE_KEYS = {"proto", "dest_ip", "dest_port"}
+
+
 def _parse_timestamp(value: str) -> tuple[datetime.datetime, int]:
     """Parse a Suricata timestamp string and return (UTC datetime, microseconds).
 
@@ -290,15 +296,23 @@ def _parse_eve_line(line: str, source_file: str) -> dict[str, Any] | None:
         row["alert_priority"] = priority if priority is not None else severity
 
     # Flatten nested structures (flow, http, dns, tls, fileinfo, etc.) so the
-    # full event context is available as searchable columns.  The ``alert``
+    # full event context is available as searchable columns. The ``alert``
     # object is already promoted to top-level columns above.
     for key, value in record.items():
-        if key in row or value is None or key == "alert":
+        if key in row or value is None or key == "alert" or key in _EVE_RAW_DUPLICATE_KEYS:
             continue
         if isinstance(value, dict):
             row.update(_flatten(value, key))
         elif not isinstance(value, (list, dict)):
             row[key] = value
+
+    # Promote HTTP fields that have a suite-wide canonical name (matching
+    # nginx's "url"/"user_agent" columns) instead of leaving them under
+    # EVE's nested "http.*" names.
+    if "http.url" in row:
+        row["url"] = row.pop("http.url")
+    if "http.http_user_agent" in row:
+        row["user_agent"] = row.pop("http.http_user_agent")
 
     return row
 

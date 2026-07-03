@@ -187,9 +187,12 @@ def _build_row(record: dict[str, Any], source_file: str) -> dict[str, Any] | Non
     if source_ip is not None:
         row["sourceIPAddress"] = source_ip
         row["src_ip"] = normalize_ip(source_ip)
+    # userAgent is kept verbatim (matching sourceIPAddress above) and also
+    # exposed as the suite-wide "user_agent" column for cross-source queries.
     user_agent = record.get("userAgent")
     if user_agent is not None:
         row["userAgent"] = user_agent
+        row["user_agent"] = user_agent
 
     return row
 
