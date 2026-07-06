@@ -22,7 +22,7 @@ from .terminal import get_terminal
 
 # Combined log format used for access and redirect logs.
 _ACCESS_LOG_RE = re.compile(
-    r'(\S+) (\S+) (\S+) \[([^\]]+)\] "([^"]*)" (\d+) (\S+) "([^"]*)" "([^"]*)"'
+    r'(\S+) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+) "([^"]*)" "([^"]*)"'
     r'(?:\s+"([^"]*)")?'
 )
 
