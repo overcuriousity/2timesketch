@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import (
+    COMMON_FIELDS,
     AuditReport,
     ConverterError,
     OutputWriter,
@@ -31,7 +32,14 @@ _ERROR_LOG_RE = re.compile(
     r'^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] (\d+)#(\d+): \*(\d+) (.*)$'
 )
 
+# Order matters for name-based detection: "redirect" must be checked before
+# "access", because "access.log" is a substring of "redirect-access.log".
 _LOG_TYPES = {
+    "redirect": {
+        "patterns": ["redirect-access.log*"],
+        "timestamp_desc": "Redirect Request Time",
+        "data_type": "web:redirect:request",
+    },
     "access": {
         "patterns": ["access.log*"],
         "timestamp_desc": "HTTP Request Time",
@@ -42,12 +50,45 @@ _LOG_TYPES = {
         "timestamp_desc": "Error Event Time",
         "data_type": "web:error:log",
     },
-    "redirect": {
-        "patterns": ["redirect-access.log*"],
-        "timestamp_desc": "Redirect Request Time",
-        "data_type": "web:redirect:request",
-    },
 }
+
+# Fields beyond the shared timeline columns, per log type. Used to build the
+# fixed CSV header so output can be streamed without buffering rows.
+_EXTRA_FIELDS_BY_TYPE = {
+    "access": sorted([
+        "additional_field",
+        "http_method",
+        "http_protocol",
+        "http_request_full",
+        "http_uri",
+        "log_type",
+        "referer",
+        "remote_ident",
+        "remote_user",
+        "response_size",
+        "status_code",
+        "user_agent",
+    ]),
+    "error": sorted([
+        "connection_id",
+        "error_level",
+        "log_type",
+        "worker_pid",
+        "worker_tid",
+    ]),
+}
+_EXTRA_FIELDS_BY_TYPE["redirect"] = _EXTRA_FIELDS_BY_TYPE["access"]
+
+
+def _fieldnames_for(log_types: list[str]) -> list[str]:
+    """Build the fixed CSV column order for the given log types."""
+    extras: set[str] = set()
+    for log_type in log_types:
+        extras.update(_EXTRA_FIELDS_BY_TYPE[log_type])
+    # nginx logs never yield a distinct destination address, so dst_ip is
+    # omitted from the header.
+    base = [f for f in COMMON_FIELDS if f != "dst_ip"]
+    return base + sorted(extras)
 
 
 def _detect_log_type(filename: str) -> str | None:
@@ -168,14 +209,51 @@ def _open_log(path: Path) -> Any:
     return open(path, "r", encoding="utf-8", errors="replace")
 
 
+def _sniff_log_type(path: Path) -> str | None:
+    """Detect the log type from file content by sampling the first lines.
+
+    Returns "access" or "error", or None when no sampled line matches either
+    format. A redirect log is indistinguishable from an access log by content,
+    so it is classified as "access" unless the filename says otherwise.
+    """
+    access_hits = 0
+    error_hits = 0
+    sampled = 0
+    try:
+        with _open_log(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                if _ACCESS_LOG_RE.match(line):
+                    access_hits += 1
+                elif _ERROR_LOG_RE.match(line):
+                    error_hits += 1
+                sampled += 1
+                if sampled >= 50:
+                    break
+    except OSError:
+        return None
+
+    if access_hits == 0 and error_hits == 0:
+        return None
+    return "access" if access_hits >= error_hits else "error"
+
+
 def _find_log_files(input_path: str) -> dict[str, list[Path]]:
     """Resolve the input path into log files grouped by log type."""
     path = Path(input_path)
 
     if path.is_file():
-        log_type = _detect_log_type(path.name)
+        # A directly passed file does not need to follow the nginx naming
+        # convention; fall back to content sniffing when the name is opaque.
+        log_type = _detect_log_type(path.name) or _sniff_log_type(path)
         if log_type is None:
-            raise ConverterError(f"Could not determine log type for: {input_path}")
+            raise ConverterError(
+                f"Could not determine log type for: {input_path} "
+                "(filename not recognized and content matches neither the "
+                "combined access log format nor the error log format)"
+            )
         return {log_type: [path]}
 
     if path.is_dir():
@@ -273,12 +351,15 @@ def convert_nginx(
         if until_dt.tzinfo is None:
             until_dt = until_dt.replace(tzinfo=datetime.timezone.utc)
 
-    rows_by_type: dict[str, list[dict[str, Any]]] = {}
     total_files = sum(len(files) for files in files_by_type.values())
     processed_files = 0
+    compute_hash = report_path is not None
+    counts: dict[str, int] = {}
 
-    for log_type, files in files_by_type.items():
-        rows: list[dict[str, Any]] = []
+    def _stream_files(log_type: str, files: list[Path], writer: OutputWriter) -> int:
+        """Parse the given files and write rows straight to the writer."""
+        nonlocal processed_files
+        written = 0
         for log_file in files:
             processed_files += 1
             ui.step(
@@ -294,33 +375,38 @@ def convert_nginx(
                         if not _filter_by_time(row, since_dt, until_dt):
                             continue
                         # Remove None values to keep output tidy.
-                        row = {k: v for k, v in row.items() if v is not None}
-                        rows.append(row)
+                        writer.add({k: v for k, v in row.items() if v is not None})
+                        written += 1
             except OSError as exc:
                 raise ConverterError(f"Failed to read {log_file}: {exc}") from exc
-        rows_by_type[log_type] = rows
-
-    compute_hash = report_path is not None
-    counts: dict[str, int] = {}
+        return written
 
     if output_dir:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        for log_type, rows in rows_by_type.items():
+        for log_type, files in files_by_type.items():
             dest = out_dir / f"timesketch_{log_type}.{output_format}"
-            writer = OutputWriter(str(dest), output_format, compute_hash=compute_hash)
-            for row in rows:
-                writer.add(row)
+            writer = OutputWriter(
+                str(dest),
+                output_format,
+                fieldnames=_fieldnames_for([log_type]),
+                compute_hash=compute_hash,
+            )
+            _stream_files(log_type, files, writer)
             counts[log_type] = writer.write()
             if report:
                 report.add_output_file(str(dest), writer.content_hash)
             ui.success(f"Wrote {counts[log_type]:,} rows to {dest}")
     else:
         # Combined output.
-        writer = OutputWriter(output, output_format, compute_hash=compute_hash)
-        for rows in rows_by_type.values():
-            for row in rows:
-                writer.add(row)
+        writer = OutputWriter(
+            output,
+            output_format,
+            fieldnames=_fieldnames_for(list(files_by_type.keys())),
+            compute_hash=compute_hash,
+        )
+        for log_type, files in files_by_type.items():
+            _stream_files(log_type, files, writer)
         total = writer.write()
         counts = {"combined": total}
         if report:
