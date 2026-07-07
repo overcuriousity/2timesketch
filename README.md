@@ -12,6 +12,9 @@ Supported sources:
 - **AWS CloudTrail** (`cloudtrail2timesketch.py`) — management, data, and insight events
 - **pfSense/OPNsense filterlog** (`filterlog2timesketch.py`) — IPv4/IPv6 TCP/UDP/ICMP firewall logs
 - **Suricata IDS/IPS logs** (`suricata2timesketch.py`) — EVE JSON, fast.log, and OPNsense syslog exports
+- **Packet captures** (`pcap2timesketch.py`) — pcap and pcapng files from
+  Wireshark/tcpdump, decoded to Ethernet/Linux-SLL/raw-IP, IPv4/IPv6, and
+  TCP/UDP/ICMP/ARP headers
 
 ## Requirements
 
@@ -52,6 +55,10 @@ All converters share:
 - `cloudtrail:data:event`
 - `firewall:filterlog:block`
 - `firewall:filterlog:pass`
+- `network:packet:tcp`
+- `network:packet:udp`
+- `network:packet:icmp`
+- `network:packet:arp`
 
 ## Entity taxonomy
 
@@ -68,8 +75,9 @@ recipient) is the same one MISP uses.
 
 | Concept | Column(s) | Used by |
 |---|---|---|
-| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata |
-| Port | `src_port`, `dst_port` | filterlog, Suricata |
+| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap |
+| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap |
+| MAC address | `src_mac`, `dst_mac` | pcap |
 | Hostname/domain | `host` | browser |
 | URL | `url` | browser, Suricata (`http` events) |
 | User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events) |
@@ -116,10 +124,11 @@ more than one address.
 | nginx error | The client address parsed from `client: ...`, when present | — |
 | CloudTrail | `sourceIPAddress`, only when it is a literal IP (AWS service principals populate this with a DNS name instead, e.g. `config.amazonaws.com` — in that case `src_ip` is empty and the raw value stays in the `sourceIPAddress` column) | — (CloudTrail records an AWS API endpoint, not a destination IP) |
 | filterlog (firewall) | The packet's source address | The packet's destination address |
+| pcap | The packet's source address | The packet's destination address |
 
-Note that filterlog is the only source with both columns populated for a
-single event, because it is the only source that observes a full network
-flow (packet-in vs. packet-out). ICMP "destination unreachable" style
+Note that filterlog and pcap are the only sources with both columns
+populated for a single event, because they're the only sources that observe
+a full network flow (packet-in vs. packet-out). ICMP "destination unreachable" style
 messages additionally carry an `icmp_destination_ip` column — the
 destination address of the *original* packet embedded in the ICMP payload,
 which is a distinct value from the ICMP packet's own `dst_ip` and is kept
@@ -275,6 +284,27 @@ python3 suricata2timesketch.py -i /var/log/suricata/eve.json -o suricata.csv \
     --report suricata.csv.report.json
 ```
 
+### pcap2timesketch
+
+```bash
+# Convert a single capture (pcap or pcapng, default: stdout CSV)
+python3 pcap2timesketch.py -i /path/to/capture.pcap
+
+# Recursively find every capture under a directory and merge them into one
+# globally time-sorted timeline
+python3 pcap2timesketch.py -i /path/to/captures/ -o combined.csv -v
+
+# Filter by packet time range and write JSONL
+python3 pcap2timesketch.py -i /path/to/capture.pcapng \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o capture.jsonl
+
+# Generate an audit report
+python3 pcap2timesketch.py -i /path/to/capture.pcap -o capture.csv \
+    --report capture.csv.report.json
+```
+
 ## Repository layout
 
 ```
@@ -287,6 +317,7 @@ python3 suricata2timesketch.py -i /var/log/suricata/eve.json -o suricata.csv \
 ├── cloudtrail2timesketch.py   # CloudTrail CLI wrapper
 ├── filterlog2timesketch.py    # pfSense/OPNsense filterlog CLI wrapper
 ├── suricata2timesketch.py     # Suricata IDS/IPS CLI wrapper
+├── pcap2timesketch.py         # pcap/pcapng CLI wrapper
 └── timesketch_converters/
     ├── __init__.py
     ├── common.py              # shared helpers
@@ -295,7 +326,8 @@ python3 suricata2timesketch.py -i /var/log/suricata/eve.json -o suricata.csv \
     ├── nginx.py               # nginx converter core
     ├── cloudtrail.py          # CloudTrail converter core
     ├── filterlog.py           # filterlog converter core
-    └── suricata.py            # Suricata converter core
+    ├── suricata.py            # Suricata converter core
+    └── pcap.py                # pcap/pcapng converter core
 ```
 
 ## Importing into Timesketch
