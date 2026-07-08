@@ -13,7 +13,9 @@ from __future__ import annotations
 import datetime
 import heapq
 import ipaddress
+import json
 import struct
+import tempfile
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -69,6 +71,11 @@ _TCP_FLAG_BITS = [
     (0x40, "ECE"),
     (0x80, "CWR"),
 ]
+
+# Maximum number of capture files (or intermediate merge temp files) kept open
+# at once by the k-way merge.  This caps the number of file descriptors the
+# converter uses, preventing "Too many open files" errors on large captures.
+_MAX_MERGE_STREAMS = 200
 
 
 class PcapParseError(ConverterError):
@@ -674,6 +681,60 @@ def _iter_rows_from_file(
         fh.close()
 
 
+def _iter_jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield rows from a spilled JSONL file, closing it when exhausted."""
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            yield json.loads(line)
+
+
+def _merge_file_streams(
+    files: list[Path],
+    since_us: int | None,
+    until_us: int | None,
+    stats: dict[str, Any],
+    spill_dir: Path | None,
+) -> Iterator[dict[str, Any]]:
+    """Merge rows from many capture files into one chronological stream.
+
+    ``heapq.merge`` over thousands of files would hold one file descriptor per
+    file, quickly exhausting the process limit.  This implementation merges in
+    chunks of :data:`_MAX_MERGE_STREAMS` files and spills intermediate results
+    to temporary JSONL files, so the number of simultaneously open descriptors
+    stays bounded.
+    """
+    streams: list[Iterator[dict[str, Any]]] = [
+        _iter_rows_from_file(f, since_us, until_us, stats) for f in files
+    ]
+
+    all_spill_paths: list[Path] = []
+    try:
+        while len(streams) > _MAX_MERGE_STREAMS:
+            next_streams: list[Iterator[dict[str, Any]]] = []
+            for i in range(0, len(streams), _MAX_MERGE_STREAMS):
+                chunk = streams[i : i + _MAX_MERGE_STREAMS]
+                merged = heapq.merge(*chunk, key=lambda r: r["timestamp"])
+                spill = tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    suffix=".pcapmerge.jsonl",
+                    dir=spill_dir,
+                    delete=False,
+                )
+                spill_path = Path(spill.name)
+                for row in merged:
+                    spill.write(json.dumps(row, ensure_ascii=False) + "\n")
+                spill.close()
+                all_spill_paths.append(spill_path)
+                next_streams.append(_iter_jsonl_rows(spill_path))
+            streams = next_streams
+
+        yield from heapq.merge(*streams, key=lambda r: r["timestamp"])
+    finally:
+        for p in all_spill_paths:
+            p.unlink(missing_ok=True)
+
+
 def convert_pcap(
     input_path: str,
     output: str,
@@ -688,7 +749,9 @@ def convert_pcap(
 
     Every discovered file is decoded lazily and merged into one globally
     chronological output via a k-way merge (stdlib ``heapq.merge``), rather
-    than buffering every row in memory.
+    than buffering every row in memory.  The merge is performed in chunks so
+    the number of simultaneously open capture files is bounded, preventing
+    "Too many open files" errors on large captures.
 
     Returns:
         Statistics dict with ``rows_written``, ``files_processed``, and
@@ -728,12 +791,15 @@ def convert_pcap(
         "rows_by_protocol": {},
     }
 
-    generators = [_iter_rows_from_file(f, since_us, until_us, stats) for f in files]
+    spill_dir: Path | None = None
+    if output != "-":
+        spill_dir = Path(output).parent
+        spill_dir.mkdir(parents=True, exist_ok=True)
 
     rows_written = 0
     ui.step("Processing", f"Parsing packets across {len(files)} file(s)")
     with ui.spinner("Parsing packets"):
-        for row in heapq.merge(*generators, key=lambda r: r["timestamp"]):
+        for row in _merge_file_streams(files, since_us, until_us, stats, spill_dir):
             writer.add(row)
             rows_written += 1
 
