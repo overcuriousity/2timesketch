@@ -15,6 +15,8 @@ Supported sources:
 - **Packet captures** (`pcap2timesketch.py`) — pcap and pcapng files from
   Wireshark/tcpdump, decoded to Ethernet/Linux-SLL/raw-IP, IPv4/IPv6, and
   TCP/UDP/ICMP/ARP headers
+- **Cowrie SSH/Telnet honeypot logs** (`cowrie2timesketch.py`) — `cowrie.json`
+  session, auth, command, client fingerprint, direct-tcpip, and TTY log events
 
 ## Requirements
 
@@ -59,6 +61,10 @@ All converters share:
 - `network:packet:udp`
 - `network:packet:icmp`
 - `network:packet:arp`
+- `cowrie:session:connect`
+- `cowrie:login:failed`
+- `cowrie:command:input`
+- `cowrie:direct-tcpip:data`
 
 ## Entity taxonomy
 
@@ -75,8 +81,8 @@ recipient) is the same one MISP uses.
 
 | Concept | Column(s) | Used by |
 |---|---|---|
-| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap |
-| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap |
+| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie |
+| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap, Cowrie |
 | MAC address | `src_mac`, `dst_mac` | pcap |
 | Hostname/domain | `host` | browser |
 | URL | `url` | browser, Suricata (`http` events) |
@@ -96,7 +102,11 @@ ICMP error payload, distinct from the ICMP packet's own `dst_ip`, or
 browser's many role-specific `*_url` columns such as `referrer_url`/
 `opener_url`/`tab_url`, which each carry a distinct meaning within a single
 row) keeps its source-native name rather than being forced into the shared
-taxonomy.
+taxonomy. Cowrie already emits `src_ip`/`dst_ip`/`src_port`/`dst_port`/
+`protocol` under those exact names, so those are promoted as-is; its
+honeypot-specific fields (`session`, `username`, `password`, `input`,
+`hassh`, ...) keep their native names since they don't map onto any shared
+role.
 
 ## IP address convention
 
@@ -125,10 +135,12 @@ more than one address.
 | CloudTrail | `sourceIPAddress`, only when it is a literal IP (AWS service principals populate this with a DNS name instead, e.g. `config.amazonaws.com` — in that case `src_ip` is empty and the raw value stays in the `sourceIPAddress` column) | — (CloudTrail records an AWS API endpoint, not a destination IP) |
 | filterlog (firewall) | The packet's source address | The packet's destination address |
 | pcap | The packet's source address | The packet's destination address |
+| Cowrie | The connecting client address (`src_ip`, as emitted natively by Cowrie) | The honeypot's own address for `session.connect`, or the forwarding target for `direct-tcpip.*` events; empty for events with no destination concept (logins, commands, TTY log closure) |
 
-Note that filterlog and pcap are the only sources with both columns
-populated for a single event, because they're the only sources that observe
-a full network flow (packet-in vs. packet-out). ICMP "destination unreachable" style
+Note that filterlog, pcap, and Cowrie's session/direct-tcpip events are the
+sources with both columns populated for a single event, because they're the
+ones that observe a full network flow (packet-in vs. packet-out, or a
+connection and its forwarding target). ICMP "destination unreachable" style
 messages additionally carry an `icmp_destination_ip` column — the
 destination address of the *original* packet embedded in the ICMP payload,
 which is a distinct value from the ICMP packet's own `dst_ip` and is kept
@@ -305,6 +317,26 @@ python3 pcap2timesketch.py -i /path/to/capture.pcap -o capture.csv \
     --report capture.csv.report.json
 ```
 
+### cowrie2timesketch
+
+```bash
+# Convert a single cowrie.json file (default: stdout CSV)
+python3 cowrie2timesketch.py -i /path/to/cowrie.json
+
+# Recursively find every cowrie.json / rotated log under a directory
+python3 cowrie2timesketch.py -i /var/log/cowrie/ -o cowrie.csv -v
+
+# Filter by event time range and write JSONL
+python3 cowrie2timesketch.py -i /path/to/cowrie.json \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o cowrie.jsonl
+
+# Generate an audit report
+python3 cowrie2timesketch.py -i /path/to/cowrie.json -o cowrie.csv \
+    --report cowrie.csv.report.json
+```
+
 ## Repository layout
 
 ```
@@ -318,6 +350,7 @@ python3 pcap2timesketch.py -i /path/to/capture.pcap -o capture.csv \
 ├── filterlog2timesketch.py    # pfSense/OPNsense filterlog CLI wrapper
 ├── suricata2timesketch.py     # Suricata IDS/IPS CLI wrapper
 ├── pcap2timesketch.py         # pcap/pcapng CLI wrapper
+├── cowrie2timesketch.py       # Cowrie honeypot CLI wrapper
 └── timesketch_converters/
     ├── __init__.py
     ├── common.py              # shared helpers
@@ -327,7 +360,8 @@ python3 pcap2timesketch.py -i /path/to/capture.pcap -o capture.csv \
     ├── cloudtrail.py          # CloudTrail converter core
     ├── filterlog.py           # filterlog converter core
     ├── suricata.py            # Suricata converter core
-    └── pcap.py                # pcap/pcapng converter core
+    ├── pcap.py                # pcap/pcapng converter core
+    └── cowrie.py              # Cowrie converter core
 ```
 
 ## Importing into Timesketch
