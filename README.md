@@ -17,6 +17,16 @@ Supported sources:
   TCP/UDP/ICMP/ARP headers
 - **Cowrie SSH/Telnet honeypot logs** (`cowrie2timesketch.py`) — `cowrie.json`
   session, auth, command, client fingerprint, direct-tcpip, and TTY log events
+- **Linux syslog/auth.log** (`syslog2timesketch.py`) — plain-text RFC 3164
+  syslog files (auth.log, secure, syslog, messages, cron.log) with structured
+  extraction of sshd, sudo, su, cron, systemd-logind, and account-management
+  events
+- **Apache HTTP Server logs** (`apache2timesketch.py`) — access (combined and
+  common/CLF format, incl. `other_vhosts_access.log`) and error logs (2.4 and
+  2.2 formats)
+- **Windows event log exports** (`evtx2timesketch.py`) — XML exports from
+  `wevtutil qe /f:xml` or `evtx_dump`, and JSONL exports from
+  `evtx_dump -o jsonl` (binary `.evtx` must be exported first)
 
 ## Requirements
 
@@ -65,6 +75,19 @@ All converters share:
 - `cowrie:login:failed`
 - `cowrie:command:input`
 - `cowrie:direct-tcpip:data`
+- `syslog:sshd:login_failed`
+- `syslog:sudo:command`
+- `syslog:account:user_created`
+- `syslog:generic:message`
+- `winevtx:logon:success`
+- `winevtx:process:create`
+- `winevtx:service:installed`
+- `winevtx:event:<event_id>` (unmapped event IDs)
+
+The Apache converter deliberately reuses the nginx converter's `web:*`
+data_type values (`web:access:request`, `web:error:log`), so saved Timesketch
+queries work across both web servers; rows are distinguished by the `source`
+column and the Apache-specific extra columns.
 
 ## Entity taxonomy
 
@@ -81,12 +104,12 @@ recipient) is the same one MISP uses.
 
 | Concept | Column(s) | Used by |
 |---|---|---|
-| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie |
-| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap, Cowrie |
+| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie, syslog, Apache, EVTX |
+| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap, Cowrie, syslog, Apache (error `[client ip:port]`), EVTX |
 | MAC address | `src_mac`, `dst_mac` | pcap |
-| Hostname/domain | `host` | browser |
+| Hostname/domain | `host` | browser, EVTX (`Computer`) |
 | URL | `url` | browser, Suricata (`http` events) |
-| User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events) |
+| User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events), Apache |
 
 Where a source's native field is a well-known, distinctly-cased key of its
 own schema (CloudTrail's `sourceIPAddress`/`userAgent`), that raw column is
@@ -136,6 +159,10 @@ more than one address.
 | filterlog (firewall) | The packet's source address | The packet's destination address |
 | pcap | The packet's source address | The packet's destination address |
 | Cowrie | The connecting client address (`src_ip`, as emitted natively by Cowrie) | The honeypot's own address for `session.connect`, or the forwarding target for `direct-tcpip.*` events; empty for events with no destination concept (logins, commands, TTY log closure) |
+| syslog | The remote peer address for sshd events; first IP literal in the message for generic rows | — (syslog entries have no destination concept) |
+| Apache access | The client address (`%h`, empty when HostnameLookups logs a hostname instead) | — (Apache logs don't record the server's own address) |
+| Apache error | The client address from `[client ip:port]`, when present | — |
+| EVTX | The `IpAddress` EventData value (e.g. logon source workstation) | — (event logs record the local computer in `host`, not a destination IP) |
 
 Note that filterlog, pcap, and Cowrie's session/direct-tcpip events are the
 sources with both columns populated for a single event, because they're the
@@ -337,6 +364,88 @@ python3 cowrie2timesketch.py -i /path/to/cowrie.json -o cowrie.csv \
     --report cowrie.csv.report.json
 ```
 
+### syslog2timesketch
+
+```bash
+# Convert a single auth.log (default: stdout CSV)
+python3 syslog2timesketch.py -i /var/log/auth.log
+
+# Recursively find auth.log/secure/syslog/messages/cron.log (incl. rotated
+# and .gz) under a directory
+python3 syslog2timesketch.py -i /var/log -o syslog.csv -v
+
+# BSD syslog timestamps omit the year; supply it explicitly for archives
+python3 syslog2timesketch.py -i /path/to/auth.log --year 2025 -o auth.csv
+
+# Only recognized events (sshd, sudo, su, cron, logind, account changes),
+# skipping generic syslog messages
+python3 syslog2timesketch.py -i /var/log/auth.log --matched-only -o auth.csv
+
+# Filter by event time range and write JSONL
+python3 syslog2timesketch.py -i /var/log/auth.log \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o auth.jsonl
+
+# Generate an audit report
+python3 syslog2timesketch.py -i /var/log/auth.log -o auth.csv \
+    --report auth.csv.report.json
+```
+
+### apache2timesketch
+
+```bash
+# Combined timeline from a directory of logs (default: stdout CSV)
+python3 apache2timesketch.py -i /var/log/apache2
+
+# Split into one file per log type
+python3 apache2timesketch.py -i /var/log/apache2 --output-dir ./output -f csv
+
+# Single file JSONL, filtered by time range
+python3 apache2timesketch.py -i /var/log/apache2/access.log \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o access.jsonl
+
+# Generate an audit report
+python3 apache2timesketch.py -i /var/log/apache2 -o apache.csv \
+    --report apache.csv.report.json
+```
+
+### evtx2timesketch
+
+Binary `.evtx` files are not read directly (the suite is standard-library
+only). Export them first:
+
+```
+# On Windows:
+wevtutil qe Security /f:xml > security.xml
+
+# Anywhere, with evtx_dump (https://github.com/omerbenamram/evtx):
+evtx_dump -o jsonl -f security.jsonl Security.evtx
+```
+
+```bash
+# Convert an XML or JSONL export (format auto-detected; default: stdout CSV)
+python3 evtx2timesketch.py -i security.xml
+
+# Recursively convert every .xml/.jsonl/.json export under a directory
+python3 evtx2timesketch.py -i /path/to/exports -o events.csv -v
+
+# Only specific event IDs (e.g. logons and logon failures)
+python3 evtx2timesketch.py -i security.xml --event-ids 4624,4625 -o logons.csv
+
+# Filter by event time range and write JSONL
+python3 evtx2timesketch.py -i security.jsonl \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o events.jsonl
+
+# Generate an audit report
+python3 evtx2timesketch.py -i security.xml -o events.csv \
+    --report events.csv.report.json
+```
+
 ## Repository layout
 
 ```
@@ -351,6 +460,9 @@ python3 cowrie2timesketch.py -i /path/to/cowrie.json -o cowrie.csv \
 ├── suricata2timesketch.py     # Suricata IDS/IPS CLI wrapper
 ├── pcap2timesketch.py         # pcap/pcapng CLI wrapper
 ├── cowrie2timesketch.py       # Cowrie honeypot CLI wrapper
+├── syslog2timesketch.py       # Linux syslog/auth.log CLI wrapper
+├── apache2timesketch.py       # Apache CLI wrapper
+├── evtx2timesketch.py         # Windows event log export CLI wrapper
 └── timesketch_converters/
     ├── __init__.py
     ├── common.py              # shared helpers
@@ -361,7 +473,10 @@ python3 cowrie2timesketch.py -i /path/to/cowrie.json -o cowrie.csv \
     ├── filterlog.py           # filterlog converter core
     ├── suricata.py            # Suricata converter core
     ├── pcap.py                # pcap/pcapng converter core
-    └── cowrie.py              # Cowrie converter core
+    ├── cowrie.py              # Cowrie converter core
+    ├── syslog.py              # syslog/auth.log converter core
+    ├── apache.py              # Apache converter core
+    └── evtx.py                # Windows event log export converter core
 ```
 
 ## Importing into Timesketch
