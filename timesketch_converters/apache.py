@@ -45,13 +45,18 @@ _CLF_RE = re.compile(
 # other_vhosts_access.log prepends "vhost:port " before the client address.
 _VHOST_PREFIX_RE = re.compile(r"^(\S+:\d+)\s+")
 
+# [client ip:port] value; IPv6 addresses are themselves bracketed
+# (e.g. "[client [2001:db8::1]:5678]"), so the client token is either a
+# bracketed IPv6 host:port or a plain IPv4/hostname:port.
+_CLIENT_RE = r"\[client (\[[^\]]+\]:\d+|[^\]]+)\]"
+
 # Apache 2.4 error log:
 # [Fri Jul 11 12:34:56.789012 2026] [core:error] [pid 123:tid 456] [client 1.2.3.4:5678] AH00126: ...
 _ERROR_24_RE = re.compile(
     r"^\[(\w{3} \w{3} [\d ]\d \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4})\] "
     r"\[(?:([\w-]+):)?(\w+)\] "
     r"\[pid (\d+)(?::tid (\d+))?\]"
-    r"(?: \[client ([^\]]+)\])? "
+    rf"(?: {_CLIENT_RE})? "
     r"(.*)$"
 )
 
@@ -60,7 +65,7 @@ _ERROR_24_RE = re.compile(
 _ERROR_22_RE = re.compile(
     r"^\[(\w{3} \w{3} [\d ]\d \d{2}:\d{2}:\d{2} \d{4})\] "
     r"\[(\w+)\]"
-    r"(?: \[client ([^\]]+)\])? "
+    rf"(?: {_CLIENT_RE})? "
     r"(.*)$"
 )
 
@@ -145,6 +150,12 @@ def _parse_apache_access_line_no_vhost(
     """Parse a combined or plain-CLF access line without a vhost prefix."""
     row = _parse_access_line(line, "access", source_file)
     if row is not None:
+        # _parse_access_line stamps timestamp_desc/data_type from nginx's own
+        # _LOG_TYPES config; overwrite with apache's own config so the two
+        # stay independent even if nginx's values ever diverge.
+        config = _LOG_TYPES["access"]
+        row["timestamp_desc"] = config["timestamp_desc"]
+        row["data_type"] = config["data_type"]
         return row
 
     match = _CLF_RE.match(line)
@@ -185,14 +196,29 @@ def _parse_apache_access_line_no_vhost(
 
 
 def _split_client(client: str) -> tuple[str, int | None]:
-    """Split an error-log ``[client ip:port]`` value; IPv6-safe."""
-    ip = client
-    port: int | None = None
-    if ":" in client:
+    """Split an error-log ``[client ip:port]`` value; IPv6-safe.
+
+    IPv6 hosts are themselves bracketed (``[2001:db8::1]:5678``), so a
+    leading ``[...]`` is treated as the whole host and only a ``:port``
+    directly after it is split off. A bare (unbracketed) host is split on
+    the last colon, but only when it's a single colon+digits suffix, since a
+    raw IPv6 address without brackets or a port also contains colons.
+    """
+    if client.startswith("["):
+        end = client.find("]")
+        if end != -1:
+            ip = client[1:end]
+            rest = client[end + 1:]
+            port = int(rest[1:]) if rest[:1] == ":" and rest[1:].isdigit() else None
+            return normalize_ip(ip), port
+        return normalize_ip(client), None
+
+    if client.count(":") == 1:
         head, _, tail = client.rpartition(":")
         if tail.isdigit() and head:
-            ip, port = head, int(tail)
-    return normalize_ip(ip), port
+            return normalize_ip(head), int(tail)
+
+    return normalize_ip(client), None
 
 
 def _parse_error_line(line: str, source_file: str) -> dict[str, Any] | None:

@@ -69,9 +69,15 @@ def _safe_int(value: str | None) -> int | None:
 
 
 def _parse_timestamp(ts: str, year: int | None) -> datetime.datetime | None:
-    """Parse a BSD or ISO syslog timestamp into a UTC-aware datetime."""
+    """Parse a BSD or ISO syslog timestamp into a UTC-aware datetime.
+
+    rsyslog can be configured to emit sub-microsecond fractional precision,
+    which fromisoformat() rejects on Python versions before 3.11; the
+    fraction is trimmed to microseconds first, mirroring the same workaround
+    in evtx.py for Windows' 7-digit fractional seconds.
+    """
     if ts[:1].isdigit():
-        value = ts.replace(" ", "T", 1).replace("Z", "+00:00")
+        value = re.sub(r"(\.\d{6})\d+", r"\1", ts).replace(" ", "T", 1).replace("Z", "+00:00")
         try:
             dt = datetime.datetime.fromisoformat(value)
         except ValueError:
@@ -229,10 +235,7 @@ def _logind_removed(m: re.Match) -> tuple[str, str, dict[str, Any]]:
 def _account_event(event: str, desc: str) -> _Handler:
     def handler(m: re.Match) -> tuple[str, str, dict[str, Any]]:
         fields: dict[str, Any] = {"username": m.group("user")}
-        try:
-            uid = m.group("uid")
-        except IndexError:
-            uid = None
+        uid = m.groupdict().get("uid")
         if uid:
             fields["uid"] = _safe_int(uid)
         return f"syslog:account:{event}", desc, fields
