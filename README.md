@@ -20,7 +20,9 @@ Supported sources:
 - **DShield webhoneypot logs** (`webhoneypot2timesketch.py`) —
   `webhoneypot_YYYY-MM-DD.json` HTTP request records from the DShield web
   honeypot (isc-agent), incl. reverse-proxy `X-Forwarded-For`/`X-Real-Ip`
-  client resolution and matched signature metadata
+  client resolution, matched signature metadata, promoted well-known
+  header columns, URL path/query splitting with SSRF fetch-target
+  extraction, and JSON-RPC/MCP request-body parsing
 - **Linux syslog/auth.log** (`syslog2timesketch.py`) — plain-text RFC 3164
   syslog files (auth.log, secure, syslog, messages, cron.log) with structured
   extraction of sshd, sudo, su, cron, systemd-logind, and account-management
@@ -389,6 +391,25 @@ python3 webhoneypot2timesketch.py -i /srv/log/ \
 python3 webhoneypot2timesketch.py -i /srv/log/ -o webhoneypot.csv \
     --report webhoneypot.csv.report.json
 ```
+
+Besides the raw `http_uri`, `http_data` and `http_headers` (compact JSON)
+columns, each row carries granular hunt columns:
+
+- **Promoted headers** — `http_accept`, `http_accept_encoding`,
+  `http_accept_language`, `http_authorization`, `http_connection`,
+  `http_content_length`, `http_content_type`, `http_cookie`, `http_origin`,
+  `http_x_forwarded_for` (case-insensitive lookup; the full header dict
+  stays in `http_headers`)
+- **URL split** — `url_path`, `url_query` (kept percent-encoded),
+  `url_query_params` (sorted unique parameter names), and
+  `url_fetch_target`: the percent-decoded value of the first SSRF-style
+  parameter (`url`, `uri`, `path`, `dest`, `destination`, `redirect`,
+  `target`, `next`, `fetch`) — e.g. cloud-metadata SSRF probes like
+  `/fetch?url=http%3A%2F%2F169.254.169.254%2F...` become directly huntable
+- **JSON-RPC / MCP bodies** — when the request body is a JSON object:
+  `jsonrpc_version`, `jsonrpc_method`, and for Model Context Protocol
+  handshakes `mcp_protocol_version`, `mcp_client_name`,
+  `mcp_client_version` (e.g. `POST /mcp` `initialize` scans)
 
 ### syslog2timesketch
 
