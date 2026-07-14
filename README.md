@@ -17,6 +17,10 @@ Supported sources:
   TCP/UDP/ICMP/ARP headers
 - **Cowrie SSH/Telnet honeypot logs** (`cowrie2timesketch.py`) — `cowrie.json`
   session, auth, command, client fingerprint, direct-tcpip, and TTY log events
+- **DShield webhoneypot logs** (`webhoneypot2timesketch.py`) —
+  `webhoneypot_YYYY-MM-DD.json` HTTP request records from the DShield web
+  honeypot (isc-agent), incl. reverse-proxy `X-Forwarded-For`/`X-Real-Ip`
+  client resolution and matched signature metadata
 - **Linux syslog/auth.log** (`syslog2timesketch.py`) — plain-text RFC 3164
   syslog files (auth.log, secure, syslog, messages, cron.log) with structured
   extraction of sshd, sudo, su, cron, systemd-logind, and account-management
@@ -75,6 +79,7 @@ All converters share:
 - `cowrie:login:failed`
 - `cowrie:command:input`
 - `cowrie:direct-tcpip:data`
+- `webhoneypot:http:request`
 - `syslog:sshd:login_failed`
 - `syslog:sudo:command`
 - `syslog:account:user_created`
@@ -104,12 +109,12 @@ recipient) is the same one MISP uses.
 
 | Concept | Column(s) | Used by |
 |---|---|---|
-| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie, syslog, Apache, EVTX |
+| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie, webhoneypot, syslog, Apache, EVTX |
 | Port | `src_port`, `dst_port` | filterlog, Suricata, pcap, Cowrie, syslog, Apache (error `[client ip:port]`), EVTX |
 | MAC address | `src_mac`, `dst_mac` | pcap |
 | Hostname/domain | `host` | browser, EVTX (`Computer`) |
 | URL | `url` | browser, Suricata (`http` events) |
-| User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events), Apache |
+| User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events), Apache, webhoneypot |
 
 Where a source's native field is a well-known, distinctly-cased key of its
 own schema (CloudTrail's `sourceIPAddress`/`userAgent`), that raw column is
@@ -159,6 +164,7 @@ more than one address.
 | filterlog (firewall) | The packet's source address | The packet's destination address |
 | pcap | The packet's source address | The packet's destination address |
 | Cowrie | The connecting client address (`src_ip`, as emitted natively by Cowrie) | The honeypot's own address for `session.connect`, or the forwarding target for `direct-tcpip.*` events; empty for events with no destination concept (logins, commands, TTY log closure) |
+| webhoneypot | The effective client address: first valid IP from `X-Real-Ip` / `X-Forwarded-For`, falling back to the socket peer (`sip`). The raw socket peer is always kept in `socket_src_ip` | The honeypot's own address (`dip`) |
 | syslog | The remote peer address for sshd events; first IP literal in the message for generic rows | — (syslog entries have no destination concept) |
 | Apache access | The client address (`%h`, empty when HostnameLookups logs a hostname instead) | — (Apache logs don't record the server's own address) |
 | Apache error | The client address from `[client ip:port]`, when present | — |
@@ -364,6 +370,26 @@ python3 cowrie2timesketch.py -i /path/to/cowrie.json -o cowrie.csv \
     --report cowrie.csv.report.json
 ```
 
+### webhoneypot2timesketch
+
+```bash
+# Convert a single webhoneypot log file (default: stdout CSV)
+python3 webhoneypot2timesketch.py -i /path/to/webhoneypot_2026-07-13.json
+
+# Recursively find every webhoneypot_*.json under a directory
+python3 webhoneypot2timesketch.py -i /srv/log/ -o webhoneypot.csv -v
+
+# Filter by event time range and write JSONL
+python3 webhoneypot2timesketch.py -i /srv/log/ \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o webhoneypot.jsonl
+
+# Generate an audit report
+python3 webhoneypot2timesketch.py -i /srv/log/ -o webhoneypot.csv \
+    --report webhoneypot.csv.report.json
+```
+
 ### syslog2timesketch
 
 ```bash
@@ -460,6 +486,7 @@ python3 evtx2timesketch.py -i security.xml -o events.csv \
 ├── suricata2timesketch.py     # Suricata IDS/IPS CLI wrapper
 ├── pcap2timesketch.py         # pcap/pcapng CLI wrapper
 ├── cowrie2timesketch.py       # Cowrie honeypot CLI wrapper
+├── webhoneypot2timesketch.py  # DShield webhoneypot CLI wrapper
 ├── syslog2timesketch.py       # Linux syslog/auth.log CLI wrapper
 ├── apache2timesketch.py       # Apache CLI wrapper
 ├── evtx2timesketch.py         # Windows event log export CLI wrapper
@@ -474,6 +501,7 @@ python3 evtx2timesketch.py -i security.xml -o events.csv \
     ├── suricata.py            # Suricata converter core
     ├── pcap.py                # pcap/pcapng converter core
     ├── cowrie.py              # Cowrie converter core
+    ├── webhoneypot.py         # DShield webhoneypot converter core
     ├── syslog.py              # syslog/auth.log converter core
     ├── apache.py              # Apache converter core
     └── evtx.py                # Windows event log export converter core
