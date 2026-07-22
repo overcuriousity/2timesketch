@@ -29,6 +29,7 @@ from .common import (
     AuditReport,
     ConverterError,
     OutputWriter,
+    add_writer_output,
     normalize_ip,
     to_iso8601,
     to_unix_microseconds,
@@ -481,6 +482,7 @@ def convert_suricata(
     since: str | None = None,
     until: str | None = None,
     verbose: bool = True,
+    split: str | None = None,
     report_path: str | None = None,
     command_line: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -521,7 +523,7 @@ def convert_suricata(
         if input_path_obj.is_dir() or input_path_obj.is_file():
             report.add_input_path(input_path_obj)
 
-    writer = OutputWriter(output, output_format, compute_hash=report_path is not None)
+    writer = OutputWriter(output, output_format, compute_hash=report_path is not None, split=split)
     rows_written = 0
     files_processed = 0
     parse_errors = 0
@@ -581,10 +583,7 @@ def convert_suricata(
     written = writer.write()
 
     if report:
-        if output == "-":
-            report.add_stdout_output(writer.content_hash)
-        else:
-            report.add_output_file(output, writer.content_hash)
+        add_writer_output(report, writer)
         report.set_statistics({
             "rows_written": written,
             "files_processed": files_processed,

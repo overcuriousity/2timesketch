@@ -44,7 +44,7 @@ Supported sources:
 
 All converters share:
 
-- A uniform CLI (`-i/--input`, `-o/--output`, `-f/--format`, `-v/--verbose`, `--report`, `--no-color`).
+- A uniform CLI (`-i/--input`, `-o/--output`, `-f/--format`, `-v/--verbose`, `--report`, `--split`, `--no-color`).
 - CSV output by default (`-f jsonl` is also supported).
 - Styled terminal output (headers, progress bars, badges, result panels) on stderr;
   pass `--no-color` or set `NO_COLOR` to disable ANSI colors and Unicode box drawing.
@@ -95,6 +95,41 @@ The Apache converter deliberately reuses the nginx converter's `web:*`
 data_type values (`web:access:request`, `web:error:log`), so saved Timesketch
 queries work across both web servers; rows are distinguished by the `source`
 column and the Apache-specific extra columns.
+
+### Splitting output files
+
+Every converter can split its output into multiple files with `--split`,
+which has two modes:
+
+- **Number of parts** — `--split 4` distributes the rows evenly across 4
+  files (sequential chunks of `ceil(total/4)` rows each).
+- **Part size** — `--split 4M` rotates to a new file whenever the current
+  part reaches the given size. The suffixes `K`, `M`, and `G` mean
+  KiB/MiB/GiB (1024-based; `4M` = 4 MiB), and explicit `KiB`/`MiB`/`GiB`
+  spellings are accepted as well. Rows are never divided across parts, so a
+  part may exceed the size limit by up to one row.
+
+Rules that apply to both modes:
+
+- `-o/--output` must be a file path — stdout cannot be split.
+- Parts are named by inserting a counter before the extension:
+  `-o output.csv` → `output.part001.csv`, `output.part002.csv`, …
+- Every CSV part is a self-contained CSV file with its own header row; JSONL
+  parts are plain line ranges. Each part can be imported into Timesketch on
+  its own.
+- Parts that would end up empty are not created.
+- With nginx/apache `--output-dir`, splitting applies to each generated
+  per-log-type file.
+- With `--report`, every part file is listed individually in the audit
+  report with its own SHA-256 hash.
+
+```bash
+# Split a large timeline into 4 parts with an equal number of rows
+python3 suricata2timesketch.py -i /var/log/suricata/eve.json -o suricata.csv --split 4
+
+# Rotate to a new file every 256 MiB
+python3 pcap2timesketch.py -i /captures/ -o capture.jsonl -f jsonl --split 256M
+```
 
 ## Entity taxonomy
 

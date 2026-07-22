@@ -6,7 +6,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from timesketch_converters.common import ConverterError, add_no_color_arg, add_report_arg
+from timesketch_converters.common import (
+    ConverterError,
+    add_no_color_arg,
+    add_report_arg,
+    add_split_arg,
+)
 from timesketch_converters.syslog import convert_syslog
 from timesketch_converters.terminal import get_terminal
 
@@ -65,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Print progress messages to stderr.",
     )
     add_report_arg(parser)
+    add_split_arg(parser)
     add_no_color_arg(parser)
 
     args = parser.parse_args(argv)
@@ -81,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             year=args.year,
             matched_only=args.matched_only,
             verbose=args.verbose,
+            split=args.split,
             report_path=args.report,
             command_line=sys.argv,
         )

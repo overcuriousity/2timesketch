@@ -26,6 +26,7 @@ from .common import (
     AuditReport,
     ConverterError,
     OutputWriter,
+    add_writer_output,
     first_ip,
     normalize_ip,
     to_iso8601,
@@ -518,6 +519,7 @@ def convert_syslog(
     year: int | None = None,
     matched_only: bool = False,
     verbose: bool = True,
+    split: str | None = None,
     report_path: str | None = None,
     command_line: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -555,6 +557,7 @@ def convert_syslog(
         output_format,
         fieldnames=_FIELDNAMES if output_format == "csv" else None,
         compute_hash=report_path is not None,
+        split=split,
     )
     rows_written = 0
     rows_generic = 0
@@ -601,10 +604,7 @@ def convert_syslog(
     written = writer.write()
 
     if report:
-        if output == "-":
-            report.add_stdout_output(writer.content_hash)
-        else:
-            report.add_output_file(output, writer.content_hash)
+        add_writer_output(report, writer)
         report.set_statistics({
             "rows_written": written,
             "files_processed": len(files),

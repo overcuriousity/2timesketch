@@ -14,6 +14,7 @@ from .common import (
     AuditReport,
     ConverterError,
     OutputWriter,
+    add_writer_output,
     log,
     normalize_ip,
     to_iso8601,
@@ -310,6 +311,7 @@ def convert_nginx(
     since: str | None = None,
     until: str | None = None,
     verbose: bool = True,
+    split: str | None = None,
     report_path: str | None = None,
     command_line: list[str] | None = None,
 ) -> dict[str, int]:
@@ -391,11 +393,12 @@ def convert_nginx(
                 output_format,
                 fieldnames=_fieldnames_for([log_type]),
                 compute_hash=compute_hash,
+                split=split,
             )
             _stream_files(log_type, files, writer)
             counts[log_type] = writer.write()
             if report:
-                report.add_output_file(str(dest), writer.content_hash)
+                add_writer_output(report, writer)
             ui.success(f"Wrote {counts[log_type]:,} rows to {dest}")
     else:
         # Combined output.
@@ -404,16 +407,14 @@ def convert_nginx(
             output_format,
             fieldnames=_fieldnames_for(list(files_by_type.keys())),
             compute_hash=compute_hash,
+            split=split,
         )
         for log_type, files in files_by_type.items():
             _stream_files(log_type, files, writer)
         total = writer.write()
         counts = {"combined": total}
         if report:
-            if output == "-":
-                report.add_stdout_output(writer.content_hash)
-            else:
-                report.add_output_file(output, writer.content_hash)
+            add_writer_output(report, writer)
 
     if report:
         report.set_statistics({

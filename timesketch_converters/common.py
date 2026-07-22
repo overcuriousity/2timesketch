@@ -275,16 +275,53 @@ class AuditReport:
 # Output writing
 # ---------------------------------------------------------------------------
 
+_RE_SPLIT_SIZE = re.compile(r"^(\d+)\s*([KMG])(?:I?B)?$", re.IGNORECASE)
+
+
+def parse_split_spec(value: str) -> tuple[str, int]:
+    """Parse a ``--split`` specification.
+
+    Returns ``("parts", n)`` for a bare integer (split into ``n`` parts with
+    an equal number of rows) or ``("size", nbytes)`` for a size specification
+    such as ``"512K"``, ``"4M"``, or ``"1GiB"`` (suffixes are KiB/MiB/GiB,
+    i.e. 1024-based). Raises :class:`ConverterError` on invalid input.
+    """
+    text = value.strip()
+    if text.isdigit():
+        n = int(text)
+        if n < 1:
+            raise ConverterError(
+                f"Invalid --split value {value!r}: number of parts must be at least 1."
+            )
+        return ("parts", n)
+    m = _RE_SPLIT_SIZE.match(text)
+    if m:
+        amount = int(m.group(1))
+        if amount < 1:
+            raise ConverterError(
+                f"Invalid --split value {value!r}: size must be at least 1."
+            )
+        factor = {"K": 1024, "M": 1024**2, "G": 1024**3}[m.group(2).upper()]
+        return ("size", amount * factor)
+    raise ConverterError(
+        f"Invalid --split value {value!r}: use N (number of parts) or "
+        "NK/NM/NG (part size in KiB/MiB/GiB, e.g. 4M)."
+    )
+
+
 class _HashingTextIO:
     """Text-stream wrapper that feeds every written chunk into a SHA-256 hash."""
 
     def __init__(self, fh: Any, hasher: Any):
         self._fh = fh
         self._hasher = hasher
+        self.bytes_written = 0
 
     def write(self, s: str) -> int:
+        data = s.encode("utf-8")
         if self._hasher is not None:
-            self._hasher.update(s.encode("utf-8"))
+            self._hasher.update(data)
+        self.bytes_written += len(data)
         return self._fh.write(s)
 
 
@@ -301,6 +338,12 @@ class OutputWriter:
     When ``compute_hash`` is enabled, the writer records the SHA-256 digest of
     the serialized output content, which is useful for forensic audit reports
     even when writing to stdout.
+
+    When ``split`` is given, the output is written as multiple part files
+    named ``<stem>.partNNN<suffix>`` (e.g. ``output.part001.csv``) instead of
+    a single file. Each written part is recorded in :attr:`parts` with its
+    own SHA-256 digest. Rows are never divided across parts, and every CSV
+    part carries its own header row.
     """
 
     def __init__(
@@ -309,6 +352,7 @@ class OutputWriter:
         fmt: str,
         fieldnames: list[str] | None = None,
         compute_hash: bool = False,
+        split: str | None = None,
     ):
         """Initialize the writer.
 
@@ -318,35 +362,66 @@ class OutputWriter:
             fieldnames: Fixed CSV column order. If omitted, columns are
                 computed from all rows, with :data:`COMMON_FIELDS` first.
             compute_hash: If True, compute and store the SHA-256 digest of the
-                serialized output content.
+                serialized output content (per part when splitting).
+            split: Optional split specification: ``"N"`` to distribute the
+                rows evenly into N part files, or ``"<n>K"``/``"<n>M"``/
+                ``"<n>G"`` to rotate to a new part file once the current part
+                reaches n KiB/MiB/GiB (rows are kept intact, so a part may
+                exceed the size by up to one row). Requires ``output`` to be
+                a file path.
         """
         self.output = output
         self.fmt = fmt.lower()
         self.fieldnames = fieldnames
         self.compute_hash = compute_hash
         self.content_hash: str | None = None
+        self.split: tuple[str, int] | None = None
+        self.parts: list[dict[str, Any]] = []
         self._count = 0
         self._raw_fh: Any = None
-        self._fh: Any = None
+        self._fh: _HashingTextIO | None = None
         self._hasher = hashlib.sha256() if compute_hash else None
         self._csv_writer: csv.DictWriter | None = None
         self._spill_fh: Any = None
         self._spill_path: Path | None = None
         self._spill_fields: set[str] = set()
+        self._part_index = 0
+        self._part_rows = 0
+        self._part_hasher: Any = None
 
         if self.fmt not in {"csv", "jsonl"}:
             raise ValueError(f"Unsupported output format: {fmt}")
 
-        self._streaming = self.fmt == "jsonl" or self.fieldnames is not None
+        if split is not None:
+            if output == "-":
+                raise ConverterError(
+                    "--split requires -o/--output to be a file path; "
+                    "stdout cannot be split."
+                )
+            self.split = parse_split_spec(split)
+
+        # Parts-mode splitting needs the total row count before any part can
+        # be written, so rows go through the on-disk spill buffer even when
+        # the format would otherwise stream.
+        self._streaming = (self.fmt == "jsonl" or self.fieldnames is not None) and (
+            self.split is None or self.split[0] != "parts"
+        )
 
     def add(self, row: dict[str, Any]) -> None:
         """Write a row to the destination or the on-disk spill buffer."""
         if self._streaming:
             self._ensure_open()
+            if (
+                self.split is not None
+                and self._part_rows > 0
+                and self._fh.bytes_written >= self.split[1]
+            ):
+                self._rotate_part()
             if self.fmt == "csv":
                 self._csv_writer.writerow(row)
             else:
                 self._fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            self._part_rows += 1
         else:
             self._ensure_spill()
             self._spill_fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -361,6 +436,9 @@ class OutputWriter:
 
     def _ensure_open(self) -> None:
         if self._fh is not None:
+            return
+        if self.split is not None:
+            self._open_part(self._part_index + 1)
             return
         if self.output == "-":
             self._raw_fh = sys.stdout
@@ -377,6 +455,48 @@ class OutputWriter:
                 restval="",
             )
             self._csv_writer.writeheader()
+
+    def _part_path(self, index: int) -> Path:
+        """Return the output path for part ``index`` (1-based)."""
+        out = Path(self.output)
+        return out.with_name(f"{out.stem}.part{index:03d}{out.suffix}")
+
+    def _open_part(self, index: int) -> None:
+        """Open a new split part file (writing the CSV header, if any)."""
+        self._part_index = index
+        self._part_rows = 0
+        part_path = self._part_path(index)
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        self._raw_fh = open(part_path, "w", newline="", encoding="utf-8")
+        self._part_hasher = hashlib.sha256() if self.compute_hash else None
+        self._fh = _HashingTextIO(self._raw_fh, self._part_hasher)
+        if self.fmt == "csv":
+            self._csv_writer = csv.DictWriter(
+                self._fh,
+                fieldnames=self.fieldnames or self._ordered_fieldnames(),
+                extrasaction="ignore",
+                restval="",
+            )
+            self._csv_writer.writeheader()
+
+    def _record_part(self) -> None:
+        """Record the current part in :attr:`parts` for audit reporting."""
+        self.parts.append({
+            "path": str(self._part_path(self._part_index)),
+            "sha256": (
+                self._part_hasher.hexdigest()
+                if self._part_hasher is not None
+                else None
+            ),
+        })
+
+    def _rotate_part(self) -> None:
+        """Close the current split part and open the next one."""
+        self._record_part()
+        self._close_destination()
+        self._fh = None
+        self._raw_fh = None
+        self._open_part(self._part_index + 1)
 
     def _ensure_spill(self) -> None:
         if self._spill_fh is not None:
@@ -399,6 +519,41 @@ class OutputWriter:
         if self._raw_fh is not None and self._raw_fh is not sys.stdout:
             self._raw_fh.close()
 
+    def _replay_split(self) -> None:
+        """Replay the spill buffer into split part files."""
+        mode, amount = self.split
+        rows_per_part = -(-self._count // amount) if mode == "parts" else 0
+
+        def open_next() -> None:
+            if self._fh is not None:
+                self._record_part()
+                self._close_destination()
+                self._raw_fh = None
+            self._open_part(self._part_index + 1)
+
+        if self._spill_path is not None:
+            with open(self._spill_path, "r", encoding="utf-8") as spill:
+                for line in spill:
+                    if self._fh is None:
+                        open_next()
+                    elif mode == "parts" and self._part_rows >= rows_per_part:
+                        open_next()
+                    elif (
+                        mode == "size"
+                        and self._part_rows > 0
+                        and self._fh.bytes_written >= amount
+                    ):
+                        open_next()
+                    if self.fmt == "csv":
+                        self._csv_writer.writerow(json.loads(line))
+                    else:
+                        self._fh.write(line)
+                    self._part_rows += 1
+        if self._fh is None:
+            # Zero rows: still produce a first part (CSV header / empty file).
+            open_next()
+        self._record_part()
+
     def write(self) -> int:
         """Finalize the output and return the number of rows written."""
         try:
@@ -406,14 +561,19 @@ class OutputWriter:
                 # Open even with zero rows so the CSV header / empty file
                 # still gets written.
                 self._ensure_open()
+                if self.split is not None:
+                    self._record_part()
             else:
                 if self._spill_fh is not None:
                     self._spill_fh.close()
-                self._ensure_open()
-                if self._spill_path is not None:
-                    with open(self._spill_path, "r", encoding="utf-8") as spill:
-                        for line in spill:
-                            self._csv_writer.writerow(json.loads(line))
+                if self.split is not None:
+                    self._replay_split()
+                else:
+                    self._ensure_open()
+                    if self._spill_path is not None:
+                        with open(self._spill_path, "r", encoding="utf-8") as spill:
+                            for line in spill:
+                                self._csv_writer.writerow(json.loads(line))
         finally:
             self._close_destination()
             if self._spill_path is not None:
@@ -422,6 +582,21 @@ class OutputWriter:
         if self._hasher is not None:
             self.content_hash = self._hasher.hexdigest()
         return self._count
+
+
+def add_writer_output(report: "AuditReport", writer: OutputWriter) -> None:
+    """Register an :class:`OutputWriter` destination in an audit report.
+
+    Records every split part when the writer split its output, otherwise the
+    single output file (or stdout).
+    """
+    if writer.parts:
+        for part in writer.parts:
+            report.add_output_file(part["path"], part["sha256"])
+    elif writer.output == "-":
+        report.add_stdout_output(writer.content_hash)
+    else:
+        report.add_output_file(writer.output, writer.content_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +631,18 @@ def add_report_arg(parser: argparse.ArgumentParser) -> None:
         "--report",
         help="Write a forensic audit report (JSON) to this path. The report "
              "can be PGP-signed afterwards to provide a tamper-evident audit trail.",
+    )
+
+
+def add_split_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--split",
+        metavar="N|SIZE",
+        help="Split the output into multiple files: N = N parts with an equal "
+             "number of rows (e.g. 4); SIZE = rotate to a new file once the "
+             "current part reaches SIZE, with a K/M/G suffix meaning "
+             "KiB/MiB/GiB (e.g. 4M = 4 MiB). Requires -o/--output to be a "
+             "file path. Parts are named <name>.partNNN<ext>.",
     )
 
 

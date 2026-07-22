@@ -26,6 +26,7 @@ from .common import (
     ConverterError,
     OutputWriter,
     ValidationError,
+    add_writer_output,
     first_ip,
     log,
     to_iso8601,
@@ -2129,6 +2130,7 @@ def convert_browser(
     browser_type: str = "auto",
     browser_name: str | None = None,
     verbose: bool = True,
+    split: str | None = None,
     report_path: str | None = None,
     command_line: list[str] | None = None,
 ) -> int:
@@ -2142,6 +2144,8 @@ def convert_browser(
             ``webkit``, or ``safari``.
         browser_name: Optional custom browser name for the ``browser`` column.
         verbose: Print progress messages to stderr.
+        split: Optional split size (e.g. ``"4"`` or ``"4M"``) to divide the
+            output into multiple parts.
         report_path: Optional path to write a JSON audit report.
         command_line: Original command-line invocation for the audit report.
 
@@ -2204,17 +2208,14 @@ def convert_browser(
     all_rows.sort(key=lambda x: x["timestamp"])
 
     writer = OutputWriter(
-        output, output_format, compute_hash=report_path is not None
+        output, output_format, compute_hash=report_path is not None, split=split
     )
     for row in all_rows:
         writer.add(row)
     written = writer.write()
 
     if report:
-        if output == "-":
-            report.add_stdout_output(writer.content_hash)
-        else:
-            report.add_output_file(output, writer.content_hash)
+        add_writer_output(report, writer)
         report.set_statistics({
             "rows_written": written,
             "browser_type": browser_type,

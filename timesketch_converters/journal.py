@@ -13,6 +13,7 @@ from .common import (
     AuditReport,
     ConverterError,
     OutputWriter,
+    add_writer_output,
     first_ip,
     log,
     to_iso8601,
@@ -149,6 +150,7 @@ def convert_journal(
     until: str | None = None,
     boot: str | None = None,
     verbose: bool = True,
+    split: str | None = None,
     report_path: str | None = None,
     command_line: list[str] | None = None,
 ) -> tuple[int, int]:
@@ -191,7 +193,8 @@ def convert_journal(
         raise ConverterError("journalctl not found. Install systemd.") from exc
 
     writer = OutputWriter(
-        output, output_format, fieldnames=fieldnames(), compute_hash=report_path is not None
+        output, output_format, fieldnames=fieldnames(), compute_hash=report_path is not None,
+        split=split,
     )
     count = 0
     errors = 0
@@ -220,10 +223,7 @@ def convert_journal(
         )
 
     if report:
-        if output == "-":
-            report.add_stdout_output(writer.content_hash)
-        else:
-            report.add_output_file(output, writer.content_hash)
+        add_writer_output(report, writer)
         report.set_statistics({
             "rows_written": written,
             "json_parse_errors": errors,
