@@ -33,6 +33,10 @@ Supported sources:
 - **Windows event log exports** (`evtx2timesketch.py`) — XML exports from
   `wevtutil qe /f:xml` or `evtx_dump`, and JSONL exports from
   `evtx_dump -o jsonl` (binary `.evtx` must be exported first)
+- **Zeek NSM logs** (`zeek2timesketch.py`) — conn, dns, http, ssl, files,
+  notice, weird, and any other Zeek/Bro TSV log (parsed generically via the
+  `#fields` headers, incl. rotated and gzip-compressed logs), merged into one
+  globally time-sorted timeline
 
 ## Requirements
 
@@ -90,6 +94,12 @@ All converters share:
 - `winevtx:process:create`
 - `winevtx:service:installed`
 - `winevtx:event:<event_id>` (unmapped event IDs)
+- `zeek:conn:connection`
+- `zeek:dns:query`
+- `zeek:http:request`
+- `zeek:ssl:connection`
+- `zeek:notice:alert`
+- `zeek:<path>:log` (any other Zeek log type)
 
 The Apache converter deliberately reuses the nginx converter's `web:*`
 data_type values (`web:access:request`, `web:error:log`), so saved Timesketch
@@ -146,12 +156,12 @@ recipient) is the same one MISP uses.
 
 | Concept | Column(s) | Used by |
 |---|---|---|
-| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie, webhoneypot, syslog, Apache, EVTX |
-| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap, Cowrie, syslog, Apache (error `[client ip:port]`), EVTX |
+| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie, webhoneypot, syslog, Apache, EVTX, Zeek |
+| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap, Cowrie, syslog, Apache (error `[client ip:port]`), EVTX, Zeek |
 | MAC address | `src_mac`, `dst_mac` | pcap |
-| Hostname/domain | `host` | browser, EVTX (`Computer`) |
-| URL | `url` | browser, Suricata (`http` events) |
-| User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events), Apache, webhoneypot |
+| Hostname/domain | `host` | browser, EVTX (`Computer`), Zeek (`http.log`) |
+| URL | `url` | browser, Suricata (`http` events), Zeek (`http.log`: `host` + `uri`) |
+| User agent | `user_agent` | nginx, CloudTrail, Suricata (`http` events), Apache, webhoneypot, Zeek (`http` events) |
 
 Where a source's native field is a well-known, distinctly-cased key of its
 own schema (CloudTrail's `sourceIPAddress`/`userAgent`), that raw column is
@@ -206,8 +216,9 @@ more than one address.
 | Apache access | The client address (`%h`, empty when HostnameLookups logs a hostname instead) | — (Apache logs don't record the server's own address) |
 | Apache error | The client address from `[client ip:port]`, when present | — |
 | EVTX | The `IpAddress` EventData value (e.g. logon source workstation) | — (event logs record the local computer in `host`, not a destination IP) |
+| Zeek | The connection originator (`id.orig_h`) | The connection responder (`id.resp_h`) |
 
-Note that filterlog, pcap, and Cowrie's session/direct-tcpip events are the
+Note that filterlog, pcap, Zeek, and Cowrie's session/direct-tcpip events are the
 sources with both columns populated for a single event, because they're the
 ones that observe a full network flow (packet-in vs. packet-out, or a
 connection and its forwarding target). ICMP "destination unreachable" style
@@ -528,6 +539,34 @@ python3 evtx2timesketch.py -i security.xml -o events.csv \
     --report events.csv.report.json
 ```
 
+### zeek2timesketch
+
+```bash
+# Merge every Zeek log in a directory into one time-sorted timeline
+# (default: stdout CSV; .log.gz and rotated logs included)
+python3 zeek2timesketch.py -i /opt/zeek/logs/current
+
+# Split into one file per Zeek log type (timesketch_conn.csv, ...)
+python3 zeek2timesketch.py -i /opt/zeek/logs/ --output-dir ./output -f csv
+
+# Filter by event time range and write JSONL
+python3 zeek2timesketch.py -i /opt/zeek/logs/current \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o zeek.jsonl
+
+# Generate an audit report
+python3 zeek2timesketch.py -i /opt/zeek/logs/current -o zeek.csv \
+    --report zeek.csv.report.json
+```
+
+The Zeek parser is generic: it reads the `#fields`/`#types`/`#path` headers
+of each file, so any Zeek log type — including custom scripts — is converted
+without a built-in schema. The connection 4-tuple (`id.orig_h`/`id.resp_h`/
+`id.orig_p`/`id.resp_p`) is promoted onto the shared `src_ip`/`dst_ip`/
+`src_port`/`dst_port` columns, http.log's `host`+`uri` become `host`/`url`,
+and every other field keeps its Zeek-native name.
+
 ## Repository layout
 
 ```
@@ -546,6 +585,7 @@ python3 evtx2timesketch.py -i security.xml -o events.csv \
 ├── syslog2timesketch.py       # Linux syslog/auth.log CLI wrapper
 ├── apache2timesketch.py       # Apache CLI wrapper
 ├── evtx2timesketch.py         # Windows event log export CLI wrapper
+├── zeek2timesketch.py         # Zeek NSM log CLI wrapper
 └── timesketch_converters/
     ├── __init__.py
     ├── common.py              # shared helpers
@@ -560,7 +600,8 @@ python3 evtx2timesketch.py -i security.xml -o events.csv \
     ├── webhoneypot.py         # DShield webhoneypot converter core
     ├── syslog.py              # syslog/auth.log converter core
     ├── apache.py              # Apache converter core
-    └── evtx.py                # Windows event log export converter core
+    ├── evtx.py                # Windows event log export converter core
+    └── zeek.py                # Zeek NSM log converter core
 ```
 
 ## Importing into Timesketch
