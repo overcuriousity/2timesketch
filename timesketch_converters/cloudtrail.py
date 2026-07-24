@@ -84,13 +84,16 @@ def _serialize(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _parse_event_time(value: str | None) -> int:
+def _parse_event_time(value: str | None) -> int | None:
     """Parse a CloudTrail ISO 8601 timestamp to Unix microseconds.
 
-    Returns 0 if the value is missing or unparseable.
+    Returns None if the value is missing or unparseable, so that callers can
+    tell "no timestamp" apart from a record that genuinely carries the Unix
+    epoch. Collapsing both onto 0 would place undated records at 1970 in the
+    middle of a real timeline.
     """
     if not value:
-        return 0
+        return None
     ts = str(value).replace("Z", "+00:00")
     try:
         dt = datetime.datetime.fromisoformat(ts)
@@ -98,7 +101,22 @@ def _parse_event_time(value: str | None) -> int:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
         return int(dt.timestamp() * 1_000_000)
     except ValueError:
-        return 0
+        return None
+
+
+def _parse_boundary(value: str, flag: str) -> int:
+    """Parse a --since/--until boundary, rejecting unparseable input.
+
+    An unusable boundary must not silently degrade into "no filter": that
+    would hand back a wider timeline than the analyst asked for.
+    """
+    parsed = _parse_event_time(value)
+    if parsed is None:
+        raise ConverterError(
+            f"Invalid {flag} timestamp: {value!r}. Expected ISO 8601, "
+            "e.g. 2026-06-01T00:00:00Z."
+        )
+    return parsed
 
 
 def _format_user(record: dict[str, Any]) -> str:
@@ -159,13 +177,19 @@ def _build_row(record: dict[str, Any], source_file: str) -> dict[str, Any] | Non
     data_type = f"cloudtrail:{str(event_category).lower()}:event"
 
     row: dict[str, Any] = {
-        "timestamp": timestamp_us,
+        "timestamp": timestamp_us if timestamp_us is not None else 0,
         "datetime": to_iso8601(timestamp_us, unit="us"),
         "timestamp_desc": "CloudTrail Event Time",
         "message": _build_message(record),
         "data_type": data_type,
         "source": source_file,
     }
+
+    # An undated record is still evidence, so it is kept rather than dropped,
+    # but it is marked so nobody reads its 0/"" timestamp as a real 1970 event.
+    # The raw eventTime, if any, is preserved by the _TOP_LEVEL_FIELDS loop.
+    if timestamp_us is None:
+        row["time_parse_error"] = True
 
     for field in _TOP_LEVEL_FIELDS:
         if field in record:
@@ -249,9 +273,15 @@ def convert_cloudtrail(
 ) -> dict[str, Any]:
     """Convert AWS CloudTrail logs to a Timesketch timeline.
 
+    Records whose ``eventTime`` is missing or unparseable are kept and marked
+    with ``time_parse_error=True`` rather than being given a 1970 timestamp
+    silently. When ``since`` or ``until`` is given they are excluded instead,
+    since they cannot be shown to fall inside the requested window.
+
     Returns:
         Statistics dict with ``rows_written``, ``files_processed``,
-        ``parse_errors``, and ``records_skipped_by_time``.
+        ``parse_errors``, ``records_skipped_by_time``,
+        ``records_missing_time``, and ``records_skipped_missing_time``.
     """
     files = _find_cloudtrail_files(input_path)
     if not files:
@@ -265,8 +295,8 @@ def convert_cloudtrail(
     )
     ui.step("Files found", f"{len(files)} CloudTrail JSON file(s)")
 
-    since_us = _parse_event_time(since) if since else 0
-    until_us = _parse_event_time(until) if until else 0
+    since_us = _parse_boundary(since, "--since") if since else None
+    until_us = _parse_boundary(until, "--until") if until else None
 
     report: AuditReport | None = None
     if report_path:
@@ -280,6 +310,8 @@ def convert_cloudtrail(
     files_processed = 0
     parse_errors = 0
     skipped_by_time = 0
+    missing_time = 0
+    skipped_missing_time = 0
 
     for idx, file_path in enumerate(files, start=1):
         ui.progress(idx, len(files), label=str(file_path))
@@ -299,13 +331,22 @@ def convert_cloudtrail(
             if row is None:
                 continue
 
-            ts = row.get("timestamp", 0)
-            if since_us and ts and ts < since_us:
-                skipped_by_time += 1
-                continue
-            if until_us and ts and ts > until_us:
-                skipped_by_time += 1
-                continue
+            if row.get("time_parse_error"):
+                missing_time += 1
+                # A record with no usable eventTime cannot be shown to fall
+                # inside a requested window, so an explicit window excludes
+                # it. The count is reported so the omission stays visible.
+                if since_us is not None or until_us is not None:
+                    skipped_missing_time += 1
+                    continue
+            else:
+                ts = row["timestamp"]
+                if since_us is not None and ts < since_us:
+                    skipped_by_time += 1
+                    continue
+                if until_us is not None and ts > until_us:
+                    skipped_by_time += 1
+                    continue
 
             writer.add(row)
             rows_written += 1
@@ -320,6 +361,8 @@ def convert_cloudtrail(
             "files_processed": files_processed,
             "parse_errors": parse_errors,
             "records_skipped_by_time": skipped_by_time,
+            "records_missing_time": missing_time,
+            "records_skipped_missing_time": skipped_missing_time,
             "since": since,
             "until": until,
         }
@@ -327,21 +370,34 @@ def convert_cloudtrail(
         report.write(report_path)
         ui.success(f"Audit report written to {report_path}")
 
-    ui.summary(
-        "Result",
-        {
-            "Rows written": f"{written:,}",
-            "Files processed": f"{files_processed}/{len(files)}",
-            "Parse errors": f"{parse_errors:,}",
-            "Skipped by time": f"{skipped_by_time:,}",
-            "Output": output if output != "-" else "stdout",
-            "Format": output_format,
-        },
-    )
+    if missing_time:
+        detail = (
+            f"{missing_time:,} record(s) have a missing or unparseable eventTime"
+        )
+        if skipped_missing_time:
+            ui.warning(f"{detail}; excluded because --since/--until was given.")
+        else:
+            ui.warning(f"{detail}; kept with time_parse_error=True.")
+
+    summary = {
+        "Rows written": f"{written:,}",
+        "Files processed": f"{files_processed}/{len(files)}",
+        "Parse errors": f"{parse_errors:,}",
+        "Skipped by time": f"{skipped_by_time:,}",
+    }
+    if missing_time:
+        summary["Missing eventTime"] = f"{missing_time:,}"
+    if skipped_missing_time:
+        summary["Skipped, no eventTime"] = f"{skipped_missing_time:,}"
+    summary["Output"] = output if output != "-" else "stdout"
+    summary["Format"] = output_format
+    ui.summary("Result", summary)
 
     return {
         "rows_written": written,
         "files_processed": files_processed,
         "parse_errors": parse_errors,
         "records_skipped_by_time": skipped_by_time,
+        "records_missing_time": missing_time,
+        "records_skipped_missing_time": skipped_missing_time,
     }
