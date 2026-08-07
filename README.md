@@ -14,7 +14,8 @@ Supported sources:
 - **Suricata IDS/IPS logs** (`suricata2timesketch.py`) — EVE JSON, fast.log, and OPNsense syslog exports
 - **Packet captures** (`pcap2timesketch.py`) — pcap and pcapng files from
   Wireshark/tcpdump, decoded to Ethernet/Linux-SLL/raw-IP, IPv4/IPv6, and
-  TCP/UDP/ICMP/ARP headers
+  TCP/UDP/ICMP/ARP headers; optional `--reassemble http` adds one row per
+  reassembled HTTP/1.x request/response transaction
 - **Cowrie SSH/Telnet honeypot logs** (`cowrie2timesketch.py`) — `cowrie.json`
   session, auth, command, client fingerprint, direct-tcpip, and TTY log events
 - **DShield webhoneypot logs** (`webhoneypot2timesketch.py`) —
@@ -81,6 +82,7 @@ All converters share:
 - `network:packet:udp`
 - `network:packet:icmp`
 - `network:packet:arp`
+- `network:http:transaction`
 - `cowrie:session:connect`
 - `cowrie:login:failed`
 - `cowrie:command:input`
@@ -396,7 +398,51 @@ python3 pcap2timesketch.py -i /path/to/capture.pcapng \
 # Generate an audit report
 python3 pcap2timesketch.py -i /path/to/capture.pcap -o capture.csv \
     --report capture.csv.report.json
+
+# Additionally reassemble HTTP/1.x transactions from the TCP streams
+python3 pcap2timesketch.py -i /path/to/capture.pcap -o capture.csv \
+    --reassemble http
 ```
+
+#### HTTP reassembly (`--reassemble http`)
+
+Off by default. When enabled, the converter reassembles the TCP streams and
+emits one extra `network:http:transaction` row per HTTP/1.x request/response
+pair, **in addition to** the per-packet rows — never instead of them. The
+packet rows stay the forensic floor: a capture converted with and without the
+flag yields the same packet rows, and every transaction row carries
+`reassembled=true` so the two kinds are never confused.
+
+Transaction row fields: `http_method`, `http_uri`, `http_protocol`,
+`http_request_full`, `http_request_bytes`, `http_request_body_bytes`,
+`status_code`, `http_status_reason`, `http_response_bytes`,
+`http_response_body_bytes`, `http_content_encoding`,
+`http_response_body_decoded_bytes` (gzip/deflate, or
+`http_response_body_decode_failed=true`), `http_transaction_index` (position
+within its connection), `packet_count`, `duration_ms`. The row is stamped with
+the capture time of the request's first captured byte, and `src_ip`/`src_port`
+are always the client, `dst_ip`/`dst_port` always the server.
+
+Anything the capture could not fully support is flagged rather than hidden:
+`http_incomplete`, `http_request_missing`, `http_response_missing`,
+`reassembly_gap` (a hole in the stream was skipped), and
+`reassembly_truncated_capture` (snaplen shorter than the frame).
+
+Limits, by design:
+
+- Cleartext HTTP/1.0 and HTTP/1.1 only. HTTPS is not decrypted, so most
+  real-world traffic yields nothing; HTTP/2 and HTTP/3 are not parsed (binary
+  framing plus HPACK/QPACK).
+- A capture recording only one direction, or taken with a snaplen shorter than
+  the frames, produces incomplete transactions or none at all.
+- Bodies are measured, not stored — no payload bytes ever reach the timeline.
+- Every enabled capture file is read a second time (the derived rows are
+  produced at response-completion time and must be sorted back into timestamp
+  order before the global merge).
+- Hostile inputs bound the run rather than abort it: per-flow ceilings on
+  buffered stream bytes, header size, body size, decompressed size, pending
+  out-of-order segments and unanswered requests. Exceeding one kills that flow
+  only — its packet rows still get written.
 
 ### cowrie2timesketch
 

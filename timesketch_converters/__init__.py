@@ -6,4 +6,4 @@ AWS CloudTrail, pfSense/OPNsense filterlog, Suricata, packet captures, Cowrie
 honeypot logs, Linux syslog/auth.log, and Windows event log exports.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

@@ -51,6 +51,21 @@ def main(argv: list[str] | None = None) -> int:
              "(e.g. 2026-07-01T23:59:59Z).",
     )
     parser.add_argument(
+        "--reassemble",
+        choices=["http"],
+        metavar="http",
+        help="Also emit one derived network:http:transaction row per HTTP/1.x "
+             "request/response, reassembled from the TCP streams. Packet rows "
+             "are still emitted in full — transaction rows are added, never "
+             "substituted. Limits: cleartext HTTP/1.0 and 1.1 only. HTTPS is "
+             "not decrypted (so most real traffic yields nothing), HTTP/2 and "
+             "HTTP/3 are not parsed (binary framing + HPACK/QPACK), and a "
+             "capture taken with a snaplen shorter than the frame or recording "
+             "only one direction cannot be reassembled — such transactions come "
+             "out flagged incomplete or not at all. Each capture file is read a "
+             "second time when this is enabled.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -73,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             until=args.until,
             verbose=args.verbose,
             split=args.split,
+            reassemble=args.reassemble,
             report_path=args.report,
             command_line=sys.argv,
         )
