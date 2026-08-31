@@ -11,6 +11,10 @@ Supported sources:
 - **nginx logs** (`nginx2timesketch.py`) — access, error, redirect
 - **AWS CloudTrail** (`cloudtrail2timesketch.py`) — management, data, and insight events
 - **pfSense/OPNsense filterlog** (`filterlog2timesketch.py`) — IPv4/IPv6 TCP/UDP/ICMP firewall logs
+- **HAProxy logs** (`haproxy2timesketch.py`) — HTTP and TCP log formats,
+  connection/SSL errors, and startup/reload lines, in a Docker `json-file`,
+  syslog, or bare envelope (auto-detected per line), with the termination
+  state decoded and the source's clock offset measured rather than assumed
 - **Suricata IDS/IPS logs** (`suricata2timesketch.py`) — EVE JSON, fast.log, and OPNsense syslog exports
 - **Packet captures** (`pcap2timesketch.py`) — pcap and pcapng files from
   Wireshark/tcpdump, decoded to Ethernet/Linux-SLL/raw-IP, IPv4/IPv6, and
@@ -158,8 +162,8 @@ recipient) is the same one MISP uses.
 
 | Concept | Column(s) | Used by |
 |---|---|---|
-| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, Suricata, pcap, Cowrie, webhoneypot, syslog, Apache, EVTX, Zeek |
-| Port | `src_port`, `dst_port` | filterlog, Suricata, pcap, Cowrie, syslog, Apache (error `[client ip:port]`), EVTX, Zeek |
+| IP address | `src_ip`, `dst_ip` | journal, browser, nginx, CloudTrail, filterlog, HAProxy, Suricata, pcap, Cowrie, webhoneypot, syslog, Apache, EVTX, Zeek |
+| Port | `src_port`, `dst_port` | filterlog, HAProxy (`src_port` only), Suricata, pcap, Cowrie, syslog, Apache (error `[client ip:port]`), EVTX, Zeek |
 | MAC address | `src_mac`, `dst_mac` | pcap |
 | Hostname/domain | `host` | browser, EVTX (`Computer`), Zeek (`http.log`) |
 | URL | `url` | browser, Suricata (`http` events), Zeek (`http.log`: `host` + `uri`) |
@@ -211,6 +215,7 @@ more than one address.
 | nginx error | The client address parsed from `client: ...`, when present | — |
 | CloudTrail | `sourceIPAddress`, only when it is a literal IP (AWS service principals populate this with a DNS name instead, e.g. `config.amazonaws.com` — in that case `src_ip` is empty and the raw value stays in the `sourceIPAddress` column) | — (CloudTrail records an AWS API endpoint, not a destination IP) |
 | filterlog (firewall) | The packet's source address | The packet's destination address |
+| HAProxy | The connecting client address; a `{...}` capture that is a bare IP (the usual `X-Forwarded-For` capture) is additionally exposed as `client_real_ip` | — (HAProxy names a backend *server*, not an address) |
 | pcap | The packet's source address | The packet's destination address |
 | Cowrie | The connecting client address (`src_ip`, as emitted natively by Cowrie) | The honeypot's own address for `session.connect`, or the forwarding target for `direct-tcpip.*` events; empty for events with no destination concept (logins, commands, TTY log closure) |
 | webhoneypot | The effective client address: first valid IP from `X-Real-Ip` / `X-Forwarded-For`, falling back to the socket peer (`sip`). The raw socket peer is always kept in `socket_src_ip` | The honeypot's own address (`dip`) |
@@ -358,6 +363,49 @@ python3 filterlog2timesketch.py -i /var/log/filter.log --year 2026 -o filterlog.
 python3 filterlog2timesketch.py -i /path/to/filter.log -o filterlog.csv \
     --report filterlog.csv.report.json
 ```
+
+### haproxy2timesketch
+
+```bash
+# Convert a HAProxy log (plain or .gz; default: stdout CSV)
+python3 haproxy2timesketch.py -i /var/log/haproxy.log
+
+# A directory of rotated logs, or a Docker json-file log
+python3 haproxy2timesketch.py -i /var/log/haproxy/ -o haproxy.csv -v
+python3 haproxy2timesketch.py -i /var/lib/docker/containers/<id>/<id>-json.log -o haproxy.csv
+
+# Filter by event time range and write JSONL
+python3 haproxy2timesketch.py -i /var/log/haproxy.log \
+    --since "2026-07-01T00:00:00Z" \
+    --until "2026-07-01T23:59:59Z" \
+    -f jsonl -o haproxy.jsonl
+
+# Startup/reload lines behind a BSD syslog prefix carry no year; supply it
+python3 haproxy2timesketch.py -i /var/log/haproxy.log --year 2026 -o haproxy.csv
+
+# Generate an audit report (records the measured clock skew, see below)
+python3 haproxy2timesketch.py -i /var/log/haproxy.log -o haproxy.csv \
+    --report haproxy.csv.report.json
+```
+
+HAProxy's `accept_date` carries no UTC offset, so it never sets the timestamp
+when a UTC-anchored clock is available: a Docker envelope's RFC 3339 `time`
+wins, `accept_date` is the fallback, and a syslog prefix plus `--year` is the
+last resort. Which one a row used is recorded in its `timestamp_desc`, and
+`accept_date` always survives verbatim in `haproxy_accept_date`.
+
+Rather than assert that the source ran UTC, the converter measures it. The
+smallest observed `envelope_clock - accept_date` skew is reported in the run
+summary and in the `--report` JSON; a whole-hour value is the tell that the
+proxy was logging local time. The *smallest* is the figure that matters
+because the difference is session duration plus write latency — HAProxy stamps
+`accept_date` when a session begins and logs it when it ends, so a tarpit or a
+slow backend inflates every other statistic while the clocks stay aligned.
+
+A startup/reload line or an unmodeled shape in a bare envelope has no clock at
+all. Rather than drop it, the converter anchors it to its nearest dated
+neighbour and says so: `timestamp_inferred` is `true`, `timestamp_desc` names
+which neighbour it borrowed from, and the summary counts the affected rows.
 
 ### suricata2timesketch
 
@@ -624,6 +672,7 @@ and every other field keeps its Zeek-native name.
 ├── nginx2timesketch.py        # nginx CLI wrapper
 ├── cloudtrail2timesketch.py   # CloudTrail CLI wrapper
 ├── filterlog2timesketch.py    # pfSense/OPNsense filterlog CLI wrapper
+├── haproxy2timesketch.py      # HAProxy CLI wrapper
 ├── suricata2timesketch.py     # Suricata IDS/IPS CLI wrapper
 ├── pcap2timesketch.py         # pcap/pcapng CLI wrapper
 ├── cowrie2timesketch.py       # Cowrie honeypot CLI wrapper
@@ -640,6 +689,7 @@ and every other field keeps its Zeek-native name.
     ├── nginx.py               # nginx converter core
     ├── cloudtrail.py          # CloudTrail converter core
     ├── filterlog.py           # filterlog converter core
+    ├── haproxy.py             # HAProxy converter core
     ├── suricata.py            # Suricata converter core
     ├── pcap.py                # pcap/pcapng converter core
     ├── cowrie.py              # Cowrie converter core
