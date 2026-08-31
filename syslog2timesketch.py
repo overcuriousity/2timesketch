@@ -58,6 +58,14 @@ def main(argv: list[str] | None = None) -> int:
              "(default: current year).",
     )
     parser.add_argument(
+        "--assume-tz",
+        dest="assume_tz",
+        metavar="TZ",
+        help="Timezone for timestamps that carry no offset (both BSD header "
+             "forms): UTC (default), local, or an explicit offset such as "
+             "+02:00. An ISO timestamp that states its own offset keeps it.",
+    )
+    parser.add_argument(
         "--matched-only",
         action="store_true",
         help="Only emit rows for recognized events (sshd, sudo, su, cron, "
@@ -85,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             since=args.since,
             until=args.until,
             year=args.year,
+            assume_tz=args.assume_tz,
             matched_only=args.matched_only,
             verbose=args.verbose,
             split=args.split,

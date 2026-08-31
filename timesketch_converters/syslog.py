@@ -8,9 +8,14 @@ events are extracted for the forensically relevant programs (sshd, sudo, su,
 cron, systemd-logind, and account-management tools); every other line is kept
 as a generic ``syslog:generic:message`` row so the timeline stays complete.
 
-BSD-style syslog timestamps omit the year; like the filterlog converter, the
-year is taken from ``--year`` (default: current year) and times are treated
-as UTC.
+Three header forms are accepted: RFC 3164 BSD (``Jul 12 06:25:01``), the
+year-first BSD variant a number of appliance firmwares emit (``2026 Jul 12
+06:25:01``), and rsyslog's ISO form. Plain BSD timestamps omit the year;
+like the filterlog converter, it is taken from ``--year`` (default: current
+year). None of the BSD forms records a timezone, so ``--assume-tz`` names the
+one they were written in — UTC by default, which is what the converter used
+unconditionally before. An ISO timestamp that states its own offset always
+keeps it.
 """
 
 from __future__ import annotations
@@ -36,22 +41,39 @@ from .terminal import get_terminal
 
 # Header formats:
 #   BSD (RFC 3164):  "Jul 12 06:25:01 host program[pid]: message"
+#   BSD + year:      "2026 Jul 12 06:25:01 host program[pid]: message"
 #   ISO (rsyslog):   "2026-07-12T06:25:01.123456+02:00 host program[pid]: message"
-# Both may carry an optional "<PRI>" prefix. The program token may lack a PID
+# All may carry an optional "<PRI>" prefix. The program token may lack a PID
 # ("kernel:") and hostnames may contain dots or be IP addresses.
+# Kernel messages forwarded through syslog keep the kernel's monotonic
+# timestamp ahead of the program token: "host [    1.540377] systemd[1]: ...".
+# Without this the whole early-boot sequence is dropped as headerless.
+_KERNEL_TIME_FRAGMENT = r"(?:\[\s*(?P<ktime>\d+\.\d+)\]\s+)?"
+
+# The program/PID/message tail is identical across the three header forms.
+_HEADER_TAIL = (
+    r"(?P<host>\S+)\s+"
+    + _KERNEL_TIME_FRAGMENT
+    + r"(?P<program>[^\s:\[]+)(?:\[(?P<pid>\d+)\])?:\s?"
+    r"(?P<msg>.*)$"
+)
+
 _BSD_HEADER_RE = re.compile(
     r"^(?:<\d+>\s*)?"
-    r"([A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+"
-    r"(\S+)\s+"
-    r"([^\s:\[]+)(?:\[(\d+)\])?:\s?"
-    r"(.*)$"
+    r"(?P<ts>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+" + _HEADER_TAIL
+)
+# syslog-ng's year-first BSD variant, emitted by a number of appliance
+# firmwares: "2026 Aug 23 00:17:04 host program[pid]: message". It is neither
+# RFC 3164 (which omits the year) nor RFC 5424, and a parser that knows only
+# those two rejects every line of such a file.
+_BSD_YEAR_HEADER_RE = re.compile(
+    r"^(?:<\d+>\s*)?"
+    r"(?P<ts>\d{4}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+" + _HEADER_TAIL
 )
 _ISO_HEADER_RE = re.compile(
     r"^(?:<\d+>\s*)?"
-    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+"
-    r"(\S+)\s+"
-    r"([^\s:\[]+)(?:\[(\d+)\])?:\s?"
-    r"(.*)$"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+"
+    + _HEADER_TAIL
 )
 
 
@@ -69,14 +91,55 @@ def _safe_int(value: str | None) -> int | None:
         return None
 
 
-def _parse_timestamp(ts: str, year: int | None) -> datetime.datetime | None:
-    """Parse a BSD or ISO syslog timestamp into a UTC-aware datetime.
+_BSD_YEAR_TS_RE = re.compile(r"^\d{4}\s+[A-Za-z]{3}\s")
+
+
+def parse_tz_offset(value: str | None) -> datetime.timezone:
+    """Parse an ``--assume-tz`` value into a fixed-offset timezone.
+
+    Accepts ``UTC``/``Z``, ``local`` (the converting machine's current
+    offset), or an explicit ``+HH:MM`` / ``-HHMM`` / ``+02`` offset.
+    """
+    if not value or value.upper() in {"UTC", "Z"}:
+        return datetime.timezone.utc
+    if value.lower() == "local":
+        offset = datetime.datetime.now().astimezone().utcoffset()
+        return datetime.timezone(offset or datetime.timedelta(0))
+    match = re.fullmatch(r"([+-])(\d{2}):?(\d{2})?", value.strip())
+    if not match:
+        raise ConverterError(
+            f"Invalid --assume-tz value {value!r}: use UTC, local, or an "
+            "offset such as +02:00."
+        )
+    sign = 1 if match.group(1) == "+" else -1
+    hours = int(match.group(2))
+    minutes = int(match.group(3) or 0)
+    return datetime.timezone(sign * datetime.timedelta(hours=hours, minutes=minutes))
+
+
+def _parse_timestamp(
+    ts: str, year: int | None, tz: datetime.timezone | None = None
+) -> datetime.datetime | None:
+    """Parse a BSD, year-first BSD, or ISO syslog timestamp into UTC.
 
     rsyslog can be configured to emit sub-microsecond fractional precision,
     which fromisoformat() rejects on Python versions before 3.11; the
     fraction is trimmed to microseconds first, mirroring the same workaround
     in evtx.py for Windows' 7-digit fractional seconds.
+
+    ``tz`` is the timezone assumed for timestamps that carry no offset (the
+    two BSD forms, and an ISO timestamp logged without one). An ISO timestamp
+    that states its own offset always keeps it.
     """
+    tz = tz or datetime.timezone.utc
+
+    if _BSD_YEAR_TS_RE.match(ts):
+        try:
+            dt = datetime.datetime.strptime(ts, "%Y %b %d %H:%M:%S")
+        except ValueError:
+            return None
+        return dt.replace(tzinfo=tz).astimezone(datetime.timezone.utc)
+
     if ts[:1].isdigit():
         value = re.sub(r"(\.\d{6})\d+", r"\1", ts).replace(" ", "T", 1).replace("Z", "+00:00")
         try:
@@ -84,7 +147,7 @@ def _parse_timestamp(ts: str, year: int | None) -> datetime.datetime | None:
         except ValueError:
             return None
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
+            dt = dt.replace(tzinfo=tz)
         return dt.astimezone(datetime.timezone.utc)
 
     try:
@@ -94,23 +157,32 @@ def _parse_timestamp(ts: str, year: int | None) -> datetime.datetime | None:
     if year is None:
         year = datetime.datetime.now(datetime.timezone.utc).year
     try:
-        return dt.replace(year=year, tzinfo=datetime.timezone.utc)
+        return dt.replace(year=year, tzinfo=tz).astimezone(datetime.timezone.utc)
     except ValueError:
         return None
 
 
 def _parse_header(
-    line: str, year: int | None
-) -> tuple[datetime.datetime, str, str, int | None, str] | None:
-    """Split a syslog line into (datetime, hostname, program, pid, message)."""
-    match = _BSD_HEADER_RE.match(line) or _ISO_HEADER_RE.match(line)
+    line: str, year: int | None, tz: datetime.timezone | None = None
+) -> tuple[datetime.datetime, str, str, int | None, str, str | None] | None:
+    """Split a syslog line into (datetime, hostname, program, pid, message).
+
+    The year-first BSD form is tried before the plain one: its leading token
+    is a four-digit year, which the plain BSD pattern would never match, but
+    the ISO pattern must not claim it either.
+    """
+    match = (
+        _BSD_YEAR_HEADER_RE.match(line)
+        or _BSD_HEADER_RE.match(line)
+        or _ISO_HEADER_RE.match(line)
+    )
     if not match:
         return None
-    ts_str, hostname, program, pid, msg = match.groups()
-    dt = _parse_timestamp(ts_str, year)
+    g = match.groupdict()
+    dt = _parse_timestamp(g["ts"], year, tz)
     if dt is None:
         return None
-    return dt, hostname, program, _safe_int(pid), msg
+    return dt, g["host"], g["program"], _safe_int(g["pid"]), g["msg"], g["ktime"]
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +494,17 @@ def _classify(program: str, msg: str) -> tuple[str, str, dict[str, Any]] | None:
 
 
 def _parse_line(
-    line: str, year: int | None, source_file: str, matched_only: bool
+    line: str,
+    year: int | None,
+    source_file: str,
+    matched_only: bool,
+    tz: datetime.timezone | None = None,
 ) -> dict[str, Any] | None:
     """Parse a single syslog line into a Timesketch row."""
-    parsed = _parse_header(line, year)
+    parsed = _parse_header(line, year, tz)
     if parsed is None:
         return None
-    dt, hostname, program, pid, msg = parsed
+    dt, hostname, program, pid, msg, kernel_time = parsed
 
     classified = _classify(program, msg)
     if classified is None:
@@ -452,6 +528,7 @@ def _parse_line(
         "hostname": hostname,
         "program": program,
         "pid": pid,
+        "kernel_time": kernel_time,
     }
     row.update({k: v for k, v in extra.items() if v is not None and v != ""})
     return row
@@ -464,6 +541,7 @@ _FIELDNAMES = [f for f in COMMON_FIELDS if f != "dst_ip"] + sorted([
     "command",
     "hostname",
     "invalid_user",
+    "kernel_time",
     "key_fingerprint",
     "pid",
     "program",
@@ -517,6 +595,7 @@ def convert_syslog(
     since: str | None = None,
     until: str | None = None,
     year: int | None = None,
+    assume_tz: str | None = None,
     matched_only: bool = False,
     verbose: bool = True,
     split: str | None = None,
@@ -533,6 +612,8 @@ def convert_syslog(
     files = _find_log_files(input_path)
     if not files:
         raise ConverterError(f"No syslog files found in: {input_path}")
+
+    tz = parse_tz_offset(assume_tz)
 
     ui = get_terminal()
     ui.header(
@@ -576,7 +657,7 @@ def convert_syslog(
                     if not line:
                         continue
 
-                    row = _parse_line(line, year, source_str, matched_only)
+                    row = _parse_line(line, year, source_str, matched_only, tz)
                     if row is None:
                         if not matched_only:
                             rows_unparseable += 1
@@ -615,6 +696,10 @@ def convert_syslog(
             "since": since,
             "until": until,
             "year": year,
+            "timezone_assumption": (
+                "timestamps without an offset (both BSD forms) assumed "
+                f"{assume_tz or 'UTC'}"
+            ),
             "matched_only": matched_only,
         })
         report.write(report_path)

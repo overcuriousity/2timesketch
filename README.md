@@ -28,10 +28,12 @@ Supported sources:
   client resolution, matched signature metadata, promoted well-known
   header columns, URL path/query splitting with SSRF fetch-target
   extraction, and JSON-RPC/MCP request-body parsing
-- **Linux syslog/auth.log** (`syslog2timesketch.py`) — plain-text RFC 3164
-  syslog files (auth.log, secure, syslog, messages, cron.log) with structured
-  extraction of sshd, sudo, su, cron, systemd-logind, and account-management
-  events
+- **Linux syslog/auth.log** (`syslog2timesketch.py`) — plain-text syslog files
+  (auth.log, secure, syslog, messages, cron.log) in RFC 3164 BSD, year-first
+  BSD (`2026 Aug 23 00:17:04 …`, as several appliance firmwares emit) or
+  rsyslog ISO form, with structured extraction of sshd, sudo, su, cron,
+  systemd-logind, and account-management events. `--assume-tz` names the
+  timezone for the header forms that record no offset
 - **Apache HTTP Server logs** (`apache2timesketch.py`) — access (combined and
   common/CLF format, incl. `other_vhosts_access.log`) and error logs (2.4 and
   2.2 formats)
@@ -42,6 +44,24 @@ Supported sources:
   notice, weird, and any other Zeek/Bro TSV log (parsed generically via the
   `#fields` headers, incl. rotated and gzip-compressed logs), merged into one
   globally time-sorted timeline
+- **W3C Extended logs** (`w3c2timesketch.py`) — IIS site logs (`u_ex*.log`),
+  http.sys `HTTPERR` logs, and any other `#Fields:`-described W3C log. The
+  field directive is honoured per occurrence, so a column set that changes
+  mid-file (an IIS restart or config change) is parsed against the block it
+  actually describes rather than silently shifting every later column
+- **Microsoft Exchange protocol logs** (`exchange2timesketch.py`) — HttpProxy
+  (Autodiscover, Owa, Ews, Mapi, ActiveSync, Rpc), ECP, RPC Client Access and
+  IMAP4/POP3 CSV logs, generic over their `#Fields:` header, with the
+  timestamp-less `GlobalActivity` metric rows anchored to their neighbours
+  rather than dropped
+- **Squid proxy logs** (`squid2timesketch.py`) — `access.log` in the native
+  `logformat squid` or the httpd-style `common`/`combined` formats (detected
+  from the data, not assumed), `cache.log` incl. helper output and wrapped
+  continuation lines, and `icap.log`
+- **conntrackd flow logs** (`conntrackd2timesketch.py`) — `conntrackd-stats.log`
+  connection records, with both the original and reply tuples as discrete
+  columns and the address translation between them derived into `nat_type`,
+  `translated_src_ip` and `translated_dst_ip`
 
 ## Requirements
 
@@ -224,9 +244,14 @@ more than one address.
 | Apache error | The client address from `[client ip:port]`, when present | — |
 | EVTX | The `IpAddress` EventData value (e.g. logon source workstation) | — (event logs record the local computer in `host`, not a destination IP) |
 | Zeek | The connection originator (`id.orig_h`) | The connection responder (`id.resp_h`) |
+| W3C (IIS/HTTPERR) | The client address (`c-ip`); a Windows scope/zone index is split off into `src_ip_zone` | The server address the request landed on (`s-ip`), with `dst_ip_zone` likewise |
+| Exchange | The client address (`ClientIpAddress`) | The server address, when the log type records one |
+| Squid access | The client address (a hostname under `log_fqdn` stays in `client_host` instead) | The upstream peer from `HIER_DIRECT/<peer>`, when it is a literal IP |
+| Squid cache | First IP literal found in the message (typically a helper's connect target) | — (cache.log entries have no destination concept) |
+| conntrackd | The originating tuple's source | The originating tuple's destination. The reply tuple is kept separately in `reply_src_ip`/`reply_dst_ip`, and `translated_src_ip`/`translated_dst_ip` name the NATted addresses |
 
-Note that filterlog, pcap, Zeek, and Cowrie's session/direct-tcpip events are the
-sources with both columns populated for a single event, because they're the
+Note that filterlog, pcap, Zeek, conntrackd, W3C, and Cowrie's
+session/direct-tcpip events are the sources with both columns populated for a single event, because they're the
 ones that observe a full network flow (packet-in vs. packet-out, or a
 connection and its forwarding target). ICMP "destination unreachable" style
 messages additionally carry an `icmp_destination_ip` column — the
@@ -681,6 +706,10 @@ and every other field keeps its Zeek-native name.
 ├── apache2timesketch.py       # Apache CLI wrapper
 ├── evtx2timesketch.py         # Windows event log export CLI wrapper
 ├── zeek2timesketch.py         # Zeek NSM log CLI wrapper
+├── w3c2timesketch.py          # IIS / HTTPERR / W3C Extended CLI wrapper
+├── exchange2timesketch.py     # Exchange protocol log CLI wrapper
+├── squid2timesketch.py        # Squid proxy log CLI wrapper
+├── conntrackd2timesketch.py   # conntrackd flow log CLI wrapper
 └── timesketch_converters/
     ├── __init__.py
     ├── common.py              # shared helpers
@@ -697,7 +726,52 @@ and every other field keeps its Zeek-native name.
     ├── syslog.py              # syslog/auth.log converter core
     ├── apache.py              # Apache converter core
     ├── evtx.py                # Windows event log export converter core
-    └── zeek.py                # Zeek NSM log converter core
+    ├── zeek.py                # Zeek NSM log converter core
+    ├── w3c.py                 # W3C Extended (IIS/HTTPERR) converter core
+    ├── exchange.py            # Exchange protocol log converter core
+    ├── squid.py               # Squid proxy log converter core
+    └── conntrackd.py          # conntrackd flow log converter core
+```
+
+### w3c2timesketch
+
+```bash
+# An IIS log root: every W3SVC<n>/ site directory plus HTTPERR, searched recursively
+python3 w3c2timesketch.py -i C:/inetpub/logs/LogFiles -o iis.csv
+
+# One timeline file per flavor (iis, httperr, w3c)
+python3 w3c2timesketch.py -i ./LogFiles --output-dir ./output -f csv
+
+# A single file, JSONL, narrowed to one day
+python3 w3c2timesketch.py -i u_ex260101.log -f jsonl -o day1.jsonl \
+    --since 2026-01-01T00:00:00Z --until 2026-01-01T23:59:59Z
+```
+
+### exchange2timesketch
+
+```bash
+# The HttpProxy tree: one directory per front-end protocol
+python3 exchange2timesketch.py -i "C:/Program Files/Microsoft/Exchange Server/V15/Logging/HttpProxy" -o proxy.csv
+
+# One timeline per protocol directory
+python3 exchange2timesketch.py -i ./HttpProxy --output-dir ./output
+```
+
+### squid2timesketch
+
+```bash
+# access.log, cache.log and icap.log together, with rotated/gzipped parts
+python3 squid2timesketch.py -i /var/log/squid -o squid.csv
+
+# cache.log timestamps carry no offset; name the appliance's timezone
+python3 squid2timesketch.py -i /var/log/squid --assume-tz +02:00 -o squid.csv
+```
+
+### conntrackd2timesketch
+
+```bash
+python3 conntrackd2timesketch.py -i /var/log/conntrackd-stats.log \
+    --assume-tz +02:00 -o flows.csv
 ```
 
 ## Importing into Timesketch
