@@ -25,6 +25,7 @@ from .common import (
     ConverterError,
     OutputWriter,
     add_writer_output,
+    first_ip,
     normalize_ip,
     to_iso8601,
     to_unix_microseconds,
@@ -39,8 +40,11 @@ from .terminal import get_terminal
 
 # Common Log Format (Apache's default "common" LogFormat): no quoted
 # referer/user-agent tail. Tried when the combined-format regex fails.
+# The %h slot accepts a comma-joined chain for the same reason the combined
+# format's does (see nginx._ACCESS_LOG_RE): a proxy header logged in %h's place
+# otherwise shifted every following group and dropped the line entirely.
 _CLF_RE = re.compile(
-    r'(\S+) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+)\s*$'
+    r'(\S+(?:,\s*\S+)*) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+)\s*$'
 )
 
 # other_vhosts_access.log prepends "vhost:port " before the client address.
@@ -93,6 +97,7 @@ _LOG_TYPES = {
 _EXTRA_FIELDS_BY_TYPE = {
     "access": sorted(set(_NGINX_EXTRA_FIELDS_BY_TYPE["access"]) | {"vhost"}),
     "error": sorted([
+        "client_host",
         "error_code",
         "error_level",
         "log_type",
@@ -131,18 +136,25 @@ def _parse_apache_access_line(
 ) -> dict[str, Any] | None:
     """Parse an Apache access log line (combined, CLF, or vhost-prefixed)."""
     row = _parse_apache_access_line_no_vhost(line, source_file)
-    if row is not None:
+    # A first parse that landed a real address is the answer. One that did not
+    # is *not* good enough to stop at while the line still carries a vhost
+    # prefix: a LogFormat that drops %l ("%v %h %u ...") presents three tokens
+    # before the timestamp just like plain "%h %l %u", so the regex matches with
+    # the **vhost** in the address slot — src_ip comes out empty, the real
+    # client lands in remote_ident, and nothing counts the line as unparseable.
+    # Re-try without the prefix and keep whichever attempt found an address.
+    if row is not None and row.get("src_ip"):
         return row
 
     vhost_match = _VHOST_PREFIX_RE.match(line)
     if vhost_match:
         stripped = line[vhost_match.end():]
-        row = _parse_apache_access_line_no_vhost(stripped, source_file)
-        if row is not None:
-            row["vhost"] = vhost_match.group(1)
-            return row
+        alt = _parse_apache_access_line_no_vhost(stripped, source_file)
+        if alt is not None and (row is None or alt.get("src_ip")):
+            alt["vhost"] = vhost_match.group(1)
+            return alt
 
-    return None
+    return row
 
 
 def _parse_apache_access_line_no_vhost(
@@ -175,6 +187,13 @@ def _parse_apache_access_line_no_vhost(
     uri = request_parts[1] if len(request_parts) > 1 else None
     protocol = request_parts[2] if len(request_parts) > 2 else None
 
+    # Same contract as the combined-format branch in nginx._parse_access_line:
+    # %h is "remote hostname (or IP address)", so the raw token is kept under
+    # client_host and src_ip is populated only when it really is an address.
+    src_ip = normalize_ip(ip)
+    if not src_ip and "," in ip:
+        src_ip = first_ip(ip)
+
     config = _LOG_TYPES["access"]
     return {
         "message": line.strip(),
@@ -184,7 +203,8 @@ def _parse_apache_access_line_no_vhost(
         "data_type": config["data_type"],
         "source": source_file,
         "log_type": "access",
-        "src_ip": normalize_ip(ip),
+        "src_ip": src_ip,
+        "client_host": ip,
         "remote_ident": remote_ident if remote_ident != "-" else None,
         "remote_user": remote_user if remote_user != "-" else None,
         "http_method": method,
@@ -196,7 +216,7 @@ def _parse_apache_access_line_no_vhost(
     }
 
 
-def _split_client(client: str) -> tuple[str, int | None]:
+def _split_client(client: str) -> tuple[str, str, int | None]:
     """Split an error-log ``[client ip:port]`` value; IPv6-safe.
 
     IPv6 hosts are themselves bracketed (``[2001:db8::1]:5678``), so a
@@ -204,22 +224,28 @@ def _split_client(client: str) -> tuple[str, int | None]:
     directly after it is split off. A bare (unbracketed) host is split on
     the last colon, but only when it's a single colon+digits suffix, since a
     raw IPv6 address without brackets or a port also contains colons.
+
+    Returns ``(src_ip, client_host, port)``. ``client_host`` is the host token
+    exactly as Apache logged it and is always populated; ``src_ip`` is the
+    canonical address, or ``""`` when the token is a hostname — an error log
+    written with HostnameLookups on records one, and keeping only the empty
+    address would lose the sole record of who triggered the error.
     """
     if client.startswith("["):
         end = client.find("]")
         if end != -1:
-            ip = client[1:end]
+            host = client[1:end]
             rest = client[end + 1:]
             port = int(rest[1:]) if rest[:1] == ":" and rest[1:].isdigit() else None
-            return normalize_ip(ip), port
-        return normalize_ip(client), None
+            return normalize_ip(host), host, port
+        return normalize_ip(client), client, None
 
     if client.count(":") == 1:
         head, _, tail = client.rpartition(":")
         if tail.isdigit() and head:
-            return normalize_ip(head), int(tail)
+            return normalize_ip(head), head, int(tail)
 
-    return normalize_ip(client), None
+    return normalize_ip(client), client, None
 
 
 def _parse_error_line(line: str, source_file: str) -> dict[str, Any] | None:
@@ -266,8 +292,9 @@ def _parse_error_line(line: str, source_file: str) -> dict[str, Any] | None:
     }
 
     if client:
-        src_ip, src_port = _split_client(client)
+        src_ip, client_host, src_port = _split_client(client)
         row["src_ip"] = src_ip
+        row["client_host"] = client_host
         if src_port is not None:
             row["src_port"] = src_port
 

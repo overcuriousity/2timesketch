@@ -8,4 +8,4 @@ conntrackd flow logs, Suricata, packet captures, Cowrie honeypot logs, Linux
 syslog/auth.log, and Windows event log exports.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"

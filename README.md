@@ -90,6 +90,12 @@ All converters share:
 | `src_ip` | The IP that originated the event (client/caller/connection initiator) |
 | `dst_ip` | The IP the event was directed at, when the source identifies one |
 
+A converter that reads its address out of a field whose format does not
+guarantee one (Apache/nginx `%h`, CloudTrail's `sourceIPAddress`) leaves
+`src_ip` empty rather than putting a non-address there, and keeps the raw
+token in a column of its own (`client_host`, `sourceIPAddress`). Discarding
+it would leave the row with no record at all of who made the request.
+
 `data_type` examples:
 
 - `journal:entry:log`
@@ -231,7 +237,7 @@ more than one address.
 |---|---|---|
 | journal | First IP literal found in the log message (the remote peer connecting to this host, e.g. `sshd` auth failures) | — (always empty; journal entries have no destination concept) |
 | browser | — (always empty; the browser is always the local client) | First IP literal found in the visited URL / related URL fields (the remote resource the browser connected to) |
-| nginx access/redirect | The client address (`$remote_addr`) | — (nginx logs don't record the server's own address) |
+| nginx access/redirect | The client address (`$remote_addr`), when the logged token really is one. A comma-joined `X-Forwarded-For` chain logged in that slot yields its leftmost entry (the original client); the whole token is always kept in `client_host` | — (nginx logs don't record the server's own address) |
 | nginx error | The client address parsed from `client: ...`, when present | — |
 | CloudTrail | `sourceIPAddress`, only when it is a literal IP (AWS service principals populate this with a DNS name instead, e.g. `config.amazonaws.com` — in that case `src_ip` is empty and the raw value stays in the `sourceIPAddress` column) | — (CloudTrail records an AWS API endpoint, not a destination IP) |
 | filterlog (firewall) | The packet's source address | The packet's destination address |
@@ -240,8 +246,8 @@ more than one address.
 | Cowrie | The connecting client address (`src_ip`, as emitted natively by Cowrie) | The honeypot's own address for `session.connect`, or the forwarding target for `direct-tcpip.*` events; empty for events with no destination concept (logins, commands, TTY log closure) |
 | webhoneypot | The effective client address: first valid IP from `X-Real-Ip` / `X-Forwarded-For`, falling back to the socket peer (`sip`). The raw socket peer is always kept in `socket_src_ip` | The honeypot's own address (`dip`) |
 | syslog | The remote peer address for sshd events; first IP literal in the message for generic rows | — (syslog entries have no destination concept) |
-| Apache access | The client address (`%h`, empty when HostnameLookups logs a hostname instead) | — (Apache logs don't record the server's own address) |
-| Apache error | The client address from `[client ip:port]`, when present | — |
+| Apache access | The client address (`%h`), when the logged token really is one. `%h` is documented as "remote hostname (**or** IP address)", so it is empty under `HostnameLookups On`; a comma-joined `X-Forwarded-For` chain logged in that slot yields its leftmost entry. Either way the whole token is kept in `client_host` | — (Apache logs don't record the server's own address) |
+| Apache error | The client address from `[client ip:port]`, when present; the host token is kept in `client_host` even when it is a hostname | — |
 | EVTX | The `IpAddress` EventData value (e.g. logon source workstation) | — (event logs record the local computer in `host`, not a destination IP) |
 | Zeek | The connection originator (`id.orig_h`) | The connection responder (`id.resp_h`) |
 | W3C (IIS/HTTPERR) | The client address (`c-ip`); a Windows scope/zone index is split off into `src_ip_zone` | The server address the request landed on (`s-ip`), with `dst_ip_zone` likewise |
