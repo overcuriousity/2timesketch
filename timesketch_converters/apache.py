@@ -41,10 +41,11 @@ from .terminal import get_terminal
 # Common Log Format (Apache's default "common" LogFormat): no quoted
 # referer/user-agent tail. Tried when the combined-format regex fails.
 # The %h slot accepts a comma-joined chain for the same reason the combined
-# format's does (see nginx._ACCESS_LOG_RE): a proxy header logged in %h's place
-# otherwise shifted every following group and dropped the line entirely.
+# format's does, and with the same comma-free element: see nginx._ACCESS_LOG_RE
+# for why `\S+` there is an exponential-backtracking bug on attacker-written
+# input, not a style choice.
 _CLF_RE = re.compile(
-    r'(\S+(?:,\s*\S+)*) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+)\s*$'
+    r'([^\s,]+(?:,\s*[^\s,]+)*) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+)\s*$'
 )
 
 # other_vhosts_access.log prepends "vhost:port " before the client address.

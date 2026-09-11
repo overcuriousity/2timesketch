@@ -30,10 +30,18 @@ from .terminal import get_terminal
 # that header is a comma-joined chain ("192.0.2.1, 198.51.100.2"). With a bare
 # `\S+` the chain shifted every following group by one and the line matched
 # nothing at all — the whole request was dropped as unparseable rather than
-# logged with a best-effort address. The `(?:,\s*\S+)*` tail only engages on a
-# literal comma, so an ordinary single-token %h still matches exactly as before.
+# logged with a best-effort address.
+#
+# Each chain element is `[^\s,]+`, never `\S+`. `\S` matches a comma, so
+# `\S+(?:,\s*\S+)*` lets the element and the separator claim the same
+# characters, and a line of repeated "!," with no match at the end backtracks
+# exponentially — roughly 4x per two extra repetitions, days of CPU from an
+# ~80-byte line. The input is a web server's access log, i.e. written by
+# whoever sends the request. Excluding the comma from the element leaves exactly
+# one way to split a chain, which keeps the match linear. `_CLF_RE` in apache.py
+# carries the same slot and must keep the same shape.
 _ACCESS_LOG_RE = re.compile(
-    r'(\S+(?:,\s*\S+)*) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+) "([^"]*)" "([^"]*)"'
+    r'([^\s,]+(?:,\s*[^\s,]+)*) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+) "([^"]*)" "([^"]*)"'
     r'(?:\s+"([^"]*)")?'
 )
 
