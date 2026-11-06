@@ -48,6 +48,7 @@ from .common import (
     ConverterError,
     OutputWriter,
     add_writer_output,
+    expand_glob,
     normalize_ip,
     to_iso8601,
     to_unix_microseconds,
@@ -650,7 +651,7 @@ def _find_log_files(input_path: str) -> list[Path]:
             raise ConverterError(f"No HAProxy log files found in: {input_path}")
         return found
 
-    matches = sorted(Path(".").glob(input_path))
+    matches = expand_glob(input_path)
     found = [p for p in matches if p.is_file() and sniff_haproxy(p)]
     if not found:
         raise ConverterError(f"No HAProxy log files matched: {input_path}")

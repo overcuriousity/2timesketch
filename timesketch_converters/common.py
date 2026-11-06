@@ -12,6 +12,7 @@ import argparse
 import csv
 import datetime
 import getpass
+import glob
 import hashlib
 import ipaddress
 import json
@@ -158,6 +159,34 @@ def first_ip(text: str | None) -> str:
     """
     ips = extract_ips(text)
     return ips[0] if ips else ""
+
+
+# ---------------------------------------------------------------------------
+# Input resolution
+# ---------------------------------------------------------------------------
+
+def expand_glob(pattern: str) -> list[Path]:
+    """Expand an input pattern that is neither a file nor a directory.
+
+    Converters call this after their own ``is_file()``/``is_dir()`` checks.
+    ``Path(".").glob()`` refuses an absolute pattern with an unhandled
+    ``NotImplementedError``, so ``/var/log/nginx/*.log`` crashed every
+    converter that used it; ``glob.glob`` accepts relative and absolute
+    patterns alike. ``recursive=True`` keeps ``**`` meaning what it meant.
+
+    A path that exists but is neither a regular file nor a directory (a pipe,
+    or a device such as ``/dev/stdin``) is refused with a ``ConverterError``:
+    converters read an input more than once (content sniffing, then parsing,
+    then hashing for the audit report), which a stream does not allow.
+    """
+    path = Path(pattern)
+    if path.exists() and not path.is_file() and not path.is_dir():
+        raise ConverterError(
+            f"Input is neither a regular file nor a directory: {pattern} "
+            "(pipes and devices such as /dev/stdin cannot be read more than once; "
+            "write the log to a file and pass that instead)"
+        )
+    return sorted(Path(match) for match in glob.glob(pattern, recursive=True))
 
 
 # ---------------------------------------------------------------------------
