@@ -25,7 +25,7 @@ from .common import (
     ConverterError,
     OutputWriter,
     add_writer_output,
-    first_ip,
+    expand_glob,
     normalize_ip,
     to_iso8601,
     to_unix_microseconds,
@@ -35,21 +35,22 @@ from .nginx import (
     _filter_by_time,
     _open_log,
     _parse_access_line,
+    _scan_dir,
+    client_address,
+    client_slot_variants,
+    match_client_slots,
 )
 from .terminal import get_terminal
 
 # Common Log Format (Apache's default "common" LogFormat): no quoted
-# referer/user-agent tail. Tried when the combined-format regex fails.
-# The %h slot accepts a comma-joined chain for the same reason the combined
-# format's does, and with the same comma-free element: see nginx._ACCESS_LOG_RE
-# for why `\S+` there is an exponential-backtracking bug on attacker-written
-# input, not a style choice.
-_CLF_RE = re.compile(
-    r'([^\s,]+(?:,\s*[^\s,]+)*) (\S*) (\S*) \[([^\]]+)\] "([^"]*)" (\d+) (\S+)\s*$'
-)
-
-# other_vhosts_access.log prepends "vhost:port " before the client address.
-_VHOST_PREFIX_RE = re.compile(r"^(\S+:\d+)\s+")
+# referer/user-agent tail. Tried when the combined format does not match. The
+# client slots in front of it are nginx's — the comma-free %h chain (see
+# nginx.py for why `\S+` there is an exponential-backtracking bug on
+# attacker-written input, not a style choice) and the vhost-prefixed layouts
+# (`%v %h %l %u`, `%v:%p %h %l %u` from other_vhosts_access.log, and
+# `%v %h %u`), resolved by nginx.match_client_slots.
+_CLF_TAIL = r' \[(?P<time>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d+) (?P<size>\S+)\s*$'
+_CLF_VARIANTS = client_slot_variants(_CLF_TAIL)
 
 # [client ip:port] value; IPv6 addresses are themselves bracketed
 # (e.g. "[client [2001:db8::1]:5678]"), so the client token is either a
@@ -96,7 +97,7 @@ _LOG_TYPES = {
 }
 
 _EXTRA_FIELDS_BY_TYPE = {
-    "access": sorted(set(_NGINX_EXTRA_FIELDS_BY_TYPE["access"]) | {"vhost"}),
+    "access": _NGINX_EXTRA_FIELDS_BY_TYPE["access"],
     "error": sorted([
         "client_host",
         "error_code",
@@ -135,33 +136,7 @@ def _detect_log_type(filename: str) -> str | None:
 def _parse_apache_access_line(
     line: str, source_file: str
 ) -> dict[str, Any] | None:
-    """Parse an Apache access log line (combined, CLF, or vhost-prefixed)."""
-    row = _parse_apache_access_line_no_vhost(line, source_file)
-    # A first parse that landed a real address is the answer. One that did not
-    # is *not* good enough to stop at while the line still carries a vhost
-    # prefix: a LogFormat that drops %l ("%v %h %u ...") presents three tokens
-    # before the timestamp just like plain "%h %l %u", so the regex matches with
-    # the **vhost** in the address slot — src_ip comes out empty, the real
-    # client lands in remote_ident, and nothing counts the line as unparseable.
-    # Re-try without the prefix and keep whichever attempt found an address.
-    if row is not None and row.get("src_ip"):
-        return row
-
-    vhost_match = _VHOST_PREFIX_RE.match(line)
-    if vhost_match:
-        stripped = line[vhost_match.end():]
-        alt = _parse_apache_access_line_no_vhost(stripped, source_file)
-        if alt is not None and (row is None or alt.get("src_ip")):
-            alt["vhost"] = vhost_match.group(1)
-            return alt
-
-    return row
-
-
-def _parse_apache_access_line_no_vhost(
-    line: str, source_file: str
-) -> dict[str, Any] | None:
-    """Parse a combined or plain-CLF access line without a vhost prefix."""
+    """Parse an Apache access log line (combined or CLF, optionally vhost-prefixed)."""
     row = _parse_access_line(line, "access", source_file)
     if row is not None:
         # _parse_access_line stamps timestamp_desc/data_type from nginx's own
@@ -172,14 +147,18 @@ def _parse_apache_access_line_no_vhost(
         row["data_type"] = config["data_type"]
         return row
 
-    match = _CLF_RE.match(line)
-    if not match:
+    match = match_client_slots(line, _CLF_VARIANTS)
+    if match is None:
         return None
 
-    ip, remote_ident, remote_user, timestamp_str, request, status, size = match.groups()
+    parts = match.groupdict()
+    ip = parts["host"]
+    ident = parts.get("ident")
+    request = parts["request"]
+    size = parts["size"]
 
     try:
-        dt = datetime.datetime.strptime(timestamp_str, "%d/%b/%Y:%H:%M:%S %z")
+        dt = datetime.datetime.strptime(parts["time"], "%d/%b/%Y:%H:%M:%S %z")
     except ValueError:
         return None
 
@@ -188,13 +167,8 @@ def _parse_apache_access_line_no_vhost(
     uri = request_parts[1] if len(request_parts) > 1 else None
     protocol = request_parts[2] if len(request_parts) > 2 else None
 
-    # Same contract as the combined-format branch in nginx._parse_access_line:
-    # %h is "remote hostname (or IP address)", so the raw token is kept under
+    # Same contract as nginx._parse_access_line: the raw %h token is kept under
     # client_host and src_ip is populated only when it really is an address.
-    src_ip = normalize_ip(ip)
-    if not src_ip and "," in ip:
-        src_ip = first_ip(ip)
-
     config = _LOG_TYPES["access"]
     return {
         "message": line.strip(),
@@ -204,15 +178,16 @@ def _parse_apache_access_line_no_vhost(
         "data_type": config["data_type"],
         "source": source_file,
         "log_type": "access",
-        "src_ip": src_ip,
+        "src_ip": client_address(ip),
         "client_host": ip,
-        "remote_ident": remote_ident if remote_ident != "-" else None,
-        "remote_user": remote_user if remote_user != "-" else None,
+        "vhost": parts.get("vhost"),
+        "remote_ident": ident if ident and ident != "-" else None,
+        "remote_user": parts["user"] if parts["user"] != "-" else None,
         "http_method": method,
         "http_uri": uri,
         "http_protocol": protocol,
         "http_request_full": request,
-        "status_code": int(status),
+        "status_code": int(parts["status"]),
         "response_size": int(size) if size.isdigit() else 0,
     }
 
@@ -356,19 +331,13 @@ def _find_log_files(input_path: str) -> dict[str, list[Path]]:
         return {log_type: [path]}
 
     if path.is_dir():
-        files_by_type: dict[str, list[Path]] = {}
-        for log_type, config in _LOG_TYPES.items():
-            found: set[Path] = set()
-            for pattern in config["patterns"]:
-                found.update(path.glob(pattern))
-            if found:
-                files_by_type[log_type] = sorted(found)
+        files_by_type = _scan_dir(path, _detect_log_type, _LOG_TYPES)
         if not files_by_type:
             raise ConverterError(f"No supported Apache log files found in: {input_path}")
         return files_by_type
 
     # Treat as a glob pattern.
-    matches = sorted(Path(".").glob(input_path))
+    matches = expand_glob(input_path)
     if not matches:
         raise ConverterError(f"No files matched pattern: {input_path}")
     files_by_type = {}
@@ -438,10 +407,12 @@ def convert_apache(
     compute_hash = report_path is not None
     counts: dict[str, int] = {}
     rows_unparseable = 0
+    rows_vhost_prefixed = 0
+    rows_with_trailing_fields = 0
 
     def _stream_files(log_type: str, files: list[Path], writer: OutputWriter) -> int:
         """Parse the given files and write rows straight to the writer."""
-        nonlocal processed_files, rows_unparseable
+        nonlocal processed_files, rows_unparseable, rows_vhost_prefixed, rows_with_trailing_fields
         written = 0
         for log_file in files:
             processed_files += 1
@@ -459,6 +430,10 @@ def convert_apache(
                         if row is None:
                             rows_unparseable += 1
                             continue
+                        if row.get("vhost"):
+                            rows_vhost_prefixed += 1
+                        if row.get("trailing_fields"):
+                            rows_with_trailing_fields += 1
                         if not _filter_by_time(row, since_dt, until_dt):
                             continue
                         writer.add({k: v for k, v in row.items() if v is not None})
@@ -503,6 +478,8 @@ def convert_apache(
         report.set_statistics({
             "rows_by_type": counts,
             "rows_unparseable": rows_unparseable,
+            "rows_vhost_prefixed": rows_vhost_prefixed,
+            "rows_with_trailing_fields": rows_with_trailing_fields,
             "since": since,
             "until": until,
             "output_dir": output_dir,
@@ -520,6 +497,19 @@ def convert_apache(
         summary_items["Output directory"] = output_dir
     for log_type, count in counts.items():
         summary_items[f"Rows ({log_type})"] = f"{count:,}"
+    if rows_vhost_prefixed:
+        summary_items["Rows with a vhost prefix"] = f"{rows_vhost_prefixed:,}"
+    if rows_with_trailing_fields:
+        summary_items["Rows with trailing fields"] = f"{rows_with_trailing_fields:,}"
     ui.summary("Result", summary_items)
+    if rows_unparseable:
+        ui.warning(
+            f"{rows_unparseable:,} lines matched no supported format and were skipped"
+        )
+    if rows_with_trailing_fields:
+        ui.warning(
+            f"{rows_with_trailing_fields:,} rows carry fields after the user agent that this "
+            "parser does not model; they are kept verbatim in trailing_fields"
+        )
 
     return counts

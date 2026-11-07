@@ -40,6 +40,7 @@ from .common import (
     ConverterError,
     OutputWriter,
     add_writer_output,
+    expand_glob,
     log,
     normalize_ip,
     to_iso8601,
@@ -447,7 +448,7 @@ def find_log_files(input_path: str) -> dict[str, list[Path]]:
             raise ConverterError(f"No supported Squid log files found in: {input_path}")
         return files_by_type
 
-    matches = sorted(Path(".").glob(input_path))
+    matches = expand_glob(input_path)
     if not matches:
         raise ConverterError(f"No files matched pattern: {input_path}")
     files_by_type = {}

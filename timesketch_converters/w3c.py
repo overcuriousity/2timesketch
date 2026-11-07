@@ -39,6 +39,7 @@ from .common import (
     ConverterError,
     OutputWriter,
     add_writer_output,
+    expand_glob,
     log,
     normalize_ip,
     to_iso8601,
@@ -417,7 +418,7 @@ def find_log_files(input_path: str) -> list[Path]:
             )
         return found
 
-    matches = sorted(p for p in Path(".").glob(input_path) if p.is_file())
+    matches = sorted(p for p in expand_glob(input_path) if p.is_file())
     if not matches:
         raise ConverterError(f"No files matched pattern: {input_path}")
     return matches

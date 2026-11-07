@@ -237,7 +237,7 @@ more than one address.
 |---|---|---|
 | journal | First IP literal found in the log message (the remote peer connecting to this host, e.g. `sshd` auth failures) | — (always empty; journal entries have no destination concept) |
 | browser | — (always empty; the browser is always the local client) | First IP literal found in the visited URL / related URL fields (the remote resource the browser connected to) |
-| nginx access/redirect | The client address (`$remote_addr`), when the logged token really is one. A comma-joined `X-Forwarded-For` chain logged in that slot yields its leftmost entry (the original client); the whole token is always kept in `client_host` | — (nginx logs don't record the server's own address) |
+| nginx access/redirect | The client address (`$remote_addr`), when the logged token really is one. A comma-joined `X-Forwarded-For` chain logged in that slot yields its leftmost entry (the original client); the whole token is always kept in `client_host`. A `log_format` that prepends the virtual host (`$server_name $remote_addr …`, with or without the `-` ident slot) is recognised by which reading puts an address in the client slot; the vhost goes to `vhost` (Apache: `%v`/`%v:%p` the same way) | — (nginx logs don't record the server's own address) |
 | nginx error | The client address parsed from `client: ...`, when present | — |
 | CloudTrail | `sourceIPAddress`, only when it is a literal IP (AWS service principals populate this with a DNS name instead, e.g. `config.amazonaws.com` — in that case `src_ip` is empty and the raw value stays in the `sourceIPAddress` column) | — (CloudTrail records an AWS API endpoint, not a destination IP) |
 | filterlog (firewall) | The packet's source address | The packet's destination address |
@@ -351,6 +351,15 @@ python3 nginx2timesketch.py -i /var/log/nginx --output-dir ./output -f csv
 # Single file JSONL
 python3 nginx2timesketch.py -i /var/log/nginx/access.log -f jsonl -o access.jsonl
 ```
+
+A directory is searched recursively and files are classified by name, so
+per-vhost layouts (`<vhost>/access.log`, `<vhost>.access.log`) are found. Fields
+a custom `log_format` appends after the user agent beyond the first
+(`additional_field`) are kept verbatim in `trailing_fields`; the run summary and
+the audit report count those rows, the vhost-prefixed rows and every line that
+matched no format. Input must be a file, directory or glob (relative or
+absolute); a pipe such as `/dev/stdin` is refused, since the input is read more
+than once.
 
 ### cloudtrail2timesketch
 
